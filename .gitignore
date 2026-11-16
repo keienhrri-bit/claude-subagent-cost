@@ -1,0 +1,5 @@
+# Written by the engine when the mod loads; machine-specific.
+.claude-plugin/types/
+node_modules/
+*.log
+HANDOFF.md

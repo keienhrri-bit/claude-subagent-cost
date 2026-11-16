@@ -1,0 +1,74 @@
+{
+  "name": "subagent-cost",
+  "version": "0.1.0",
+  "description": "Shows what each subagent cost and how much of your 5-hour and 7-day quota is used, compacts after a finished task, and asks Claude for a handoff brief before the quota runs out.",
+  "author": { "name": "keienhrri-bit" },
+  "license": "MIT",
+  "repository": "https://github.com/keienhrri-bit/claude-subagent-cost",
+  "keywords": ["subagent", "usage", "quota", "rate limit", "compact", "handoff"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "Language of the rows and notices: en or zh.",
+      "default": "en",
+      "options": ["en", "zh"]
+    },
+    "subagentModelPolicy": {
+      "type": "string",
+      "title": "Subagent model policy",
+      "description": "warn: a notice when a subagent runs on an inherited Opus/Fable/Mythos model. off: no notice. downgrade:<model> (e.g. downgrade:sonnet): once a subagent type has been seen running on an Opus/Fable/Mythos main session's model with no model passed, later subagents of that type run on <model> instead. The first spawn of each type is not changed, a model passed in the call is kept, and a type whose definition names the same model as the main session counts as inheriting.",
+      "default": "warn"
+    },
+    "autoCompact": {
+      "type": "string",
+      "title": "Compact after a finished task",
+      "description": "auto: compact after a turn that answered (not one that ended with a question) once the context passes a threshold. ask: offer a button instead. off: never.",
+      "default": "auto",
+      "options": ["auto", "ask", "off"]
+    },
+    "compactAtPercent": {
+      "type": "number",
+      "title": "Compact at context percent",
+      "description": "Context window fill, in percent, that counts as large. 0 turns this test off.",
+      "default": 60
+    },
+    "compactAtTokens": {
+      "type": "number",
+      "title": "Compact at context tokens",
+      "description": "Context tokens that count as large, whichever of the two comes first. 0 turns this test off.",
+      "default": 150000
+    },
+    "warnAt": {
+      "type": "number",
+      "title": "Warn at 5-hour percent",
+      "description": "5-hour window percentage that turns the summary row into a warning and shows one notice.",
+      "default": 88
+    },
+    "handoffAt": {
+      "type": "number",
+      "title": "Handoff at 5-hour percent",
+      "description": "5-hour window percentage at which Claude is asked to write the handoff brief and start no new large task.",
+      "default": 90
+    },
+    "warnAt7d": {
+      "type": "number",
+      "title": "Warn at 7-day percent",
+      "description": "The same warning for the 7-day window.",
+      "default": 88
+    },
+    "handoffAt7d": {
+      "type": "number",
+      "title": "Handoff at 7-day percent",
+      "description": "The same handoff for the 7-day window.",
+      "default": 90
+    },
+    "handoffPath": {
+      "type": "string",
+      "title": "Handoff file",
+      "description": "Where Claude writes the handoff brief; a relative path is relative to the session's working directory.",
+      "default": "HANDOFF.md"
+    }
+  }
+}

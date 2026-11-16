@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="324" viewBox="0 0 1560 324" role="img" aria-label="subagent-cost: illustration with invented numbers">
+<rect width="1560" height="324" rx="10" fill="#1e1f24"/>
+<circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+<text x="780" y="25" fill="#8b8d98" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" text-anchor="middle">subagent-cost: illustration with invented numbers</text>
+<text x="22" y="56" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" font-weight="bold" xml:space="preserve">● Agent(Explore: list the source files)</text>
+<text x="22" y="80" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿  Done</text>
+<text x="22" y="104" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿ subagent Explore · claude-haiku-5-5 · in 12k / out 3k / cache write 41k (5m) / cache read 80k · 23 tools · 41s · ≈&lt;0.1% of 5h quota (estimate)</text>
+<text x="22" y="128" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve"></text>
+<text x="22" y="152" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" font-weight="bold" xml:space="preserve">● Agent(general-purpose: review the parser)</text>
+<text x="22" y="176" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿  Done</text>
+<text x="22" y="200" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿ subagent general-purpose · claude-opus-5-5 · in 30.5k / out 9.2k / cache write 88k (1h) / cache read 410k · 57 tools · 3m14s · ≈4.5% of 5h quota (estimate) · inherited Opus</text>
+<text x="22" y="224" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve"></text>
+<text x="22" y="248" fill="#e0af68" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">⚠ 5h 89% (resets in 40m) · 7d 52% · main 123k / subagents 673.7k tokens (2, 1 inherited Opus)    [ Compact context ]</text>
+<text x="22" y="272" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">&gt; </text>
+</svg>

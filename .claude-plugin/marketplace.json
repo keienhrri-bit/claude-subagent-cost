@@ -1,0 +1,6 @@
+{
+  "name": "subagent-cost",
+  "description": "subagent-cost: per-subagent token use, quota summary, task-boundary compaction and a handoff brief before the quota runs out, for Claude Code.",
+  "owner": { "name": "keienhrri-bit" },
+  "plugins": [{ "name": "subagent-cost", "source": "./" }]
+}

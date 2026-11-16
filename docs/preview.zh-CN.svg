@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="324" viewBox="0 0 1560 324" role="img" aria-label="subagent-cost：示意图，数字为虚构">
+<rect width="1560" height="324" rx="10" fill="#1e1f24"/>
+<circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+<text x="780" y="25" fill="#8b8d98" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" text-anchor="middle">subagent-cost：示意图，数字为虚构</text>
+<text x="22" y="56" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" font-weight="bold" xml:space="preserve">● Agent(Explore: 列出源码文件)</text>
+<text x="22" y="80" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿  Done</text>
+<text x="22" y="104" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿ 子代理 Explore · claude-haiku-5-5 · 输入 1.2 万 / 输出 3 千 / 缓存写 4.1 万（5m） / 缓存读 8 万 · 23 次工具 · 41 秒 · 约占 5 小时额度 &lt;0.1%（估算）</text>
+<text x="22" y="128" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve"></text>
+<text x="22" y="152" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" font-weight="bold" xml:space="preserve">● Agent(general-purpose: 审一遍解析器)</text>
+<text x="22" y="176" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿  Done</text>
+<text x="22" y="200" fill="#8b8d98" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">  ⎿ 子代理 general-purpose · claude-opus-5-5 · 输入 3.05 万 / 输出 9.2 千 / 缓存写 8.8 万（1h） / 缓存读 41 万 · 57 次工具 · 3 分 14 秒 · 约占 5 小时额度 4.5%（估算） · 继承了 Opus</text>
+<text x="22" y="224" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve"></text>
+<text x="22" y="248" fill="#e0af68" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">⚠ 5h 89%（40 分后重置） · 7d 52% · 主会话 12.3 万 / 子代理 67.4 万（2 个，1 个继承了 Opus）    [ 压缩上下文 ]</text>
+<text x="22" y="272" fill="#d7d8dd" font-family="Menlo, Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">&gt; </text>
+</svg>
