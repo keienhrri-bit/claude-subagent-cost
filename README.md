@@ -167,6 +167,13 @@ Not tested:
 - **A subagent that is not backgrounded**, where tool count and duration come from the Agent result.
 - **The question heuristic** can miss a question that does not end in a question mark, and can treat a rhetorical last line as a question.
 
+## Related
+
+By the same author:
+
+- [claude-code-usage-audit](https://github.com/keienhrri-bit/claude-code-usage-audit): a usage ledger across sessions and days, read from local Claude Code and Codex logs, showing where the usage went.
+- [agent-cite-check](https://github.com/keienhrri-bit/agent-cite-check): checks an agent's report against your local files (quoted lines, numbers, changed files), without calling a model.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

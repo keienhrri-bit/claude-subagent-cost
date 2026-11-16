@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- README: a Related section linking claude-code-usage-audit and agent-cite-check.
+
 ## 0.1.0 (2026-11-16)
 
 First release.

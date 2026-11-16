@@ -36,7 +36,7 @@ Install: `/plugin install subagent-cost --marketplace keienhrri-bit/claude-subag
 **Not tested.** Drawing: headless sessions draw nothing, so the rows and the button have not been seen on screen, in the terminal or the desktop app. Direct between-turn compaction in an interactive terminal session. The estimate's error.
 ```
 
-**相关项目互链**：同一作者的其他项目公开以后，可以在 README 末尾加一节 Related 互相链接。现在还没有可链接的公开仓库，先不加。
+**相关项目互链**：README 末尾的 Related 一节已经链到 claude-code-usage-audit 和 agent-cite-check。
 
 ## 2. 收稿的列表
 

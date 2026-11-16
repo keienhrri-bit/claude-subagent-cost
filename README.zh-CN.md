@@ -167,6 +167,13 @@ claude plugin install subagent-cost --marketplace keienhrri-bit/claude-subagent-
 - **不在后台运行的子代理**：它的工具次数和用时取自 Agent 工具的结果，这条路没测。
 - **判断“以提问结束”的规则**会漏掉不以问号结尾的提问，也可能把反问句当成提问。
 
+## 相关工具
+
+同一作者的其他工具：
+
+- [claude-code-usage-audit](https://github.com/keienhrri-bit/claude-code-usage-audit)：跨会话、跨天的历史用量账，从本地 Claude Code 和 Codex 日志里看用量花在了哪里。
+- [agent-cite-check](https://github.com/keienhrri-bit/agent-cite-check)：不调用模型，把 Agent 回报里的引文、数字和改动逐条对回本地文件。
+
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
