@@ -154,7 +154,7 @@ claude plugin install subagent-cost --marketplace keienhrri-bit/claude-subagent-
 
 ## 测过什么，没测什么
 
-截至 v0.1.1。单元测试和引擎测试都通过（49 个，`claude plugin test`）。此外，我们在用 `--plugin-dir` 新开的一次性会话里实际跑过这个 mod（Claude Code 2.1.325，主模型 Haiku，阈值按测试需要设置）。
+截至 v0.1.1。单元测试和引擎测试都通过（50 个，`claude plugin test`）。此外，我们在用 `--plugin-dir` 新开的一次性会话里实际跑过这个 mod（Claude Code 2.1.325，主模型 Haiku，阈值按测试需要设置）。
 
 在 v0.1.1 上跑的：
 

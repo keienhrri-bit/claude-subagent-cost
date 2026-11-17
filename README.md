@@ -154,7 +154,7 @@ A status-line tool draws in a terminal session. We have not checked whether the 
 
 ## What has been tested, and what has not
 
-As of v0.1.1. The unit and engine tests pass (49 tests, `claude plugin test`). Beyond those, the mod was run in throwaway sessions started with `--plugin-dir` (Claude Code 2.1.325, Haiku as the main model), with thresholds set for the test.
+As of v0.1.1. The unit and engine tests pass (50 tests, `claude plugin test`). Beyond those, the mod was run in throwaway sessions started with `--plugin-dir` (Claude Code 2.1.325, Haiku as the main model), with thresholds set for the test.
 
 Run on v0.1.1:
 

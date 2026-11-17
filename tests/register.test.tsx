@@ -439,6 +439,38 @@ test('a reading whose reset time has passed holds nothing off', async ($, on) =>
   expect(w.compactions.length).toBe(1)
 })
 
+test('an Agent result that arrives before the run ends is not counted twice', async ($, on) => {
+  const w = world(on)
+  await $.agent.spawn({
+    tool_use_id: 'spawn-1',
+    prompt: 'look for the config loader',
+    description: 'find loader',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: false,
+    fork: false,
+  })
+  await $.tool.call({ tool: 'Agent', description: 'find loader', prompt: 'look for the config loader', subagent_type: 'Explore' })
+  const id = w.toolUseIds.at(-1) ?? ''
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'agent-spawn-1' })
+  await $.tool.call({ tool: 'Bash', command: 'pwd', agentId: 'agent-spawn-1' })
+  await $.turn.complete({
+    answer: 'found it',
+    durationMs: 41_000,
+    isAborted: false,
+    turnId: 'sub-1',
+    agentId: 'agent-spawn-1',
+    reason: 'answer',
+    usage: { model: 'claude-haiku-5-5', input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+  })
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'ToolUse', requestId: id, props: toolUseProps(id) })
+  const line = await ui.find({ type: 'Text', text: /subagent Explore/ })
+  expect(line?.text).toContain('23 tools')
+  expect(line?.text).toContain('41s')
+  await ui.unmount()
+})
+
 test('a background subagent counts its own tool calls, and a continued run adds to its row', async ($, on) => {
   world(on)
   await $.agent.spawn({

@@ -463,11 +463,17 @@ export const register: Register = (on, options) => {
         }
         // A subagent continued with a message runs again under its id: the
         // run adds to the row, its tools and time with it.
+        // An Agent result that came first already counts this run's tools.
         const isContinued = base.turns > 0
         const row = addRun(
           {
             ...base,
-            toolUses: calls > 0 ? (base.toolUses ?? 0) + calls : base.toolUses,
+            toolUses:
+              calls === 0
+                ? base.toolUses
+                : isContinued
+                  ? (base.toolUses ?? 0) + calls
+                  : (base.toolUses ?? calls),
             durationMs: isContinued
               ? (base.durationMs ?? 0) + e.durationMs
               : (base.durationMs ?? e.durationMs),

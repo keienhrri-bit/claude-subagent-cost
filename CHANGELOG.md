@@ -13,7 +13,7 @@ Fixes from a code review.
 - The quota line names every inherited family (`Opus/Fable`), not only the first.
 - README: a Related section linking claude-code-usage-audit and agent-cite-check; tested and untested parts brought up to date.
 
-Tested: 49 unit and engine tests; in throwaway sessions, the rows on screen in a terminal session and the combined handoff request. Not tested: drawing in the desktop app, and the estimate's error.
+Tested: 50 unit and engine tests; in throwaway sessions, the rows on screen in a terminal session and the combined handoff request. Not tested: drawing in the desktop app, and the estimate's error.
 
 ## 0.1.0 (2026-11-16)
 
