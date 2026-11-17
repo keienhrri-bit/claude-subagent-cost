@@ -2,16 +2,22 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   EMPTY_TALLY,
+  addRun,
   agentLine,
   alertsFor,
+  applySplit,
   bandLine,
   cacheSplit,
   contextOverThreshold,
   endsWithQuestion,
   fmtTokens,
+  handoffNote,
   isExpensive,
+  liveWindows,
+  mergeWindows,
   parsePolicy,
   priceOf,
+  rearm,
   shareOf,
   stepEstimate,
   weigh,
@@ -51,6 +57,37 @@ describe('prices', () => {
     expect(cacheSplit({ ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 10 })).toEqual({ ttl: '5m', share1h: 0 })
     expect(cacheSplit({ ephemeral_1h_input_tokens: 10, ephemeral_5m_input_tokens: 0 })).toEqual({ ttl: '1h', share1h: 1 })
     expect(cacheSplit(null)).toEqual({})
+  })
+})
+
+describe('subagent rows', () => {
+  const fresh: AgentRow = {
+    toolUseId: 't1',
+    agentId: 'a1',
+    type: 'general-purpose',
+    inherited: false,
+    background: false,
+    usage: EMPTY_TALLY,
+    weighted: 0,
+    turns: 0,
+  }
+  const writes = { ...EMPTY_TALLY, cacheWrite: 1_000_000 }
+
+  test('each run keeps the price it was given: a later model or split does not reprice it', async () => {
+    let r = addRun(fresh, writes, 'claude-sonnet-5-5')
+    expect(r.weighted).toBe(2.5) // split not known yet: priced as 5-minute writes
+    r = applySplit(r, 1)
+    expect(r.weighted).toBe(4) // the Agent result says 1-hour writes
+    r = addRun(r, writes, 'claude-haiku-5-5')
+    r = applySplit(r, 0)
+    expect(r.weighted).toBe(4.125) // run 1 stays at 4; run 2 is Haiku, 5-minute
+    expect(r.usage.cacheWrite).toBe(2_000_000)
+    expect(r.turns).toBe(2)
+  })
+
+  test('a row an earlier version stored keeps its weight and adds the next run', async () => {
+    const old: AgentRow = { ...fresh, usage: writes, weighted: 2.5, turns: 1, usageModel: 'claude-sonnet-5-5' }
+    expect(addRun(old, writes, 'claude-haiku-5-5').weighted).toBe(2.625)
   })
 })
 
@@ -116,6 +153,44 @@ describe('alerts', () => {
     const th = { ...TH, warnAt7d: 50, handoffAt7d: 60 }
     const out = alertsFor([{ kind: 'seven_day', percentUsed: 55 }], th, [], [])
     expect(out.map(a => a.kind)).toEqual(['warn'])
+  })
+
+  test('a reset time that crosses a ten-minute mark by seconds keeps one alert', async () => {
+    const first = alertsFor([five(90, '2026-01-01T15:04:59.000Z')], TH, [], [])
+    const key = first[0]?.key ?? ''
+    expect(alertsFor([five(91, '2026-01-01T15:05:01.000Z')], TH, [], [key])).toEqual([])
+  })
+
+  test('keys an earlier version kept still count', async () => {
+    const slot = String(Math.round(Date.parse(RESET) / 600_000))
+    expect(alertsFor([five(91)], TH, [], [`five_hour@${slot}`])).toEqual([])
+    expect(alertsFor([{ kind: 'five_hour', percentUsed: 91 }], TH, [], ['five_hour@none'])).toEqual([])
+  })
+
+  test('without a reset time, a reading under half the warning threshold re-arms its kind', async () => {
+    const bare = (percentUsed: number): WindowReading => ({ kind: 'five_hour', percentUsed })
+    const key = alertsFor([bare(90)], TH, [], [])[0]?.key ?? ''
+    expect(alertsFor([bare(92)], TH, [], [key])).toEqual([])
+    // No reading is not a reset, nor is a small dip.
+    expect(rearm([key], [], TH)).toEqual([key])
+    expect(rearm([key], [bare(60)], TH)).toEqual([key])
+    const kept = rearm([key], [bare(3)], TH)
+    expect(kept).toEqual([])
+    expect(alertsFor([bare(90)], TH, [], kept).map(a => a.kind)).toEqual(['handoff'])
+  })
+
+  test('a reading whose reset time has passed is not live', async () => {
+    const bare: WindowReading = { kind: 'seven_day', percentUsed: 50 }
+    expect(liveWindows([five(92), bare], Date.parse('2026-01-01T15:00:01.000Z'))).toEqual([bare])
+    expect(liveWindows([five(92), bare], Date.parse('2026-01-01T14:00:00.000Z'))).toEqual([five(92), bare])
+  })
+
+  test('one handoff note names every window that is due', async () => {
+    const seven: WindowReading = { kind: 'seven_day', percentUsed: 92, resetsAt: '2026-01-05T00:00:00.000Z' }
+    expect(mergeWindows([five(90)], [seven, five(91)])).toEqual([five(91), seven])
+    const text = handoffNote(mergeWindows([five(90)], [seven, five(91)]), 'HANDOFF.md', '/work/demo', Date.parse('2026-01-01T13:00:00.000Z'))
+    expect(text).toContain('The 5-hour usage window is at 91% (resets in 2h), and the 7-day usage window is at 92%')
+    expect(text.match(/write a handoff brief/g)?.length).toBe(1)
   })
 })
 
@@ -188,5 +263,20 @@ describe('formatting', () => {
       lang: 'zh',
     })
     expect(line).toBe('5h 63%（2 小时后重置） · 7d 41% · 主会话 12.3 万 / 子代理 27.2 万（2 个，1 个继承了 Opus）')
+  })
+
+  test('the band names every family that was inherited', async () => {
+    const line = bandLine({
+      windows: [],
+      mainTokens: 0,
+      agents: [
+        { ...row, inherited: true, model: 'claude-opus-5-5' },
+        { ...row, toolUseId: 't3', inherited: true, model: 'claude-fable-5-2' },
+        { ...row, toolUseId: 't4', inherited: true, model: 'claude-opus-5-5' },
+      ],
+      now: Date.parse('2026-01-01T13:00:00.000Z'),
+      lang: 'en',
+    })
+    expect(line).toContain('(3, 3 inherited Opus/Fable)')
   })
 })

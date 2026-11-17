@@ -14,9 +14,11 @@ import {
   EMPTY_TALLY,
   FIVE_HOUR,
   REGROWTH_TOKENS,
+  addRun,
   addTally,
   agentLine,
   alertsFor,
+  applySplit,
   bandLine,
   cacheSplit,
   contextOverThreshold,
@@ -26,9 +28,12 @@ import {
   handoffToast,
   isExpensive,
   langOf,
+  liveWindows,
+  mergeWindows,
   parsePolicy,
   pastHandoff,
   pastWarn,
+  rearm,
   stepEstimate,
   tallyOf,
   totalTokens,
@@ -71,6 +76,11 @@ let cfg: Config = configOf({})
 let isMainTurnRunning = false
 let askedByTool = false
 let lastStop: { at: number; inFlight: number } | null = null
+// Tool calls a subagent made in its current run, by agent id, until the run ends.
+const toolCalls = new Map<string, number>()
+
+/** How long what was seen of a subagent type stands before one spawn checks it again. */
+const RELEARN_MS = 7 * 24 * 3_600_000
 
 /** One line to the debug log (`claude --debug`), never to the transcript. */
 function dbg($: EngineInterface, text: string): void {
@@ -109,25 +119,29 @@ function sameModel(a: string | undefined, b: string | undefined): boolean {
 
 /**
  * Whether subagents of this type have been seen running on the parent's model
- * when no `model` was given: true, false, or undefined when never seen. Kept
- * in `$.store`, so it carries across sessions.
+ * when no `model` was given: true, false, or undefined when never seen or seen
+ * more than RELEARN_MS ago. Kept in `$.store`, so it carries across sessions.
+ *
+ * The spawn does not say what a type's definition names, so a definition that
+ * changes is noticed only when the type is seen again: under `warn` or `off`,
+ * or once the record is older than RELEARN_MS.
  */
 async function inheritsByType($: EngineInterface, type: string): Promise<boolean | undefined> {
   const v = await $.store.get(`inherits:${type}`)
-  return typeof v === 'boolean' ? v : undefined
+  // 0.1.0 kept a bare boolean with no time: learn the type again.
+  if (!v || typeof v !== 'object') return undefined
+  const { inherits, at } = v as { inherits?: unknown; at?: unknown }
+  if (typeof inherits !== 'boolean' || typeof at !== 'number') return undefined
+  if ((await $.clock.now()) - at > RELEARN_MS) return undefined
+  return inherits
 }
 
 async function learnType($: EngineInterface, type: string, inherits: boolean): Promise<void> {
-  if ((await inheritsByType($, type)) === inherits) return
-  await $.store.set(`inherits:${type}`, inherits)
+  await $.store.set(`inherits:${type}`, { inherits, at: await $.clock.now() })
 }
 
 function rowFor(agents: Record<string, AgentRow>, agentId: string): AgentRow | undefined {
   return Object.values(agents).find(a => a.agentId === agentId)
-}
-
-function reweigh(row: AgentRow): AgentRow {
-  return { ...row, weighted: weigh(row.usage, row.usageModel ?? row.model, row.share1h ?? 0) }
 }
 
 async function totalWeighted($: EngineInterface): Promise<number> {
@@ -211,7 +225,7 @@ async function maybeCompact($: EngineInterface, turnAtSchedule: number): Promise
   if (state.holdUntilTurn !== undefined && main.turns < state.holdUntilTurn) return
   // Past the handoff threshold a compaction could drop the handoff request,
   // and it spends quota of its own.
-  if (pastHandoff(await read($, windowsAtom), cfg.th)) return
+  if (pastHandoff(liveWindows(await read($, windowsAtom), await $.clock.now()), cfg.th)) return
   const usage = await $.session.usage()
   const ctx = { tokens: usage.context.tokens, percent: usage.context.percent }
   if (!contextOverThreshold(ctx, cfg.compact)) {
@@ -346,16 +360,20 @@ export const register: Register = (on, options) => {
         weighted: 0,
         turns: 0,
       }
-      const row = reweigh({
-        ...base,
-        toolUseId: e.tool_use_id,
-        agentId: base.agentId ?? result.agentId,
-        model: base.model ?? result.resolvedModel,
-        toolUses: result.totalToolUseCount,
-        durationMs: result.totalDurationMs,
-        cacheTtl: split.ttl ?? base.cacheTtl,
-        share1h: split.share1h ?? base.share1h,
-      })
+      // The split is the result's last request's, and is applied to the run
+      // the result reports (the latest); earlier runs keep their price.
+      const row = applySplit(
+        {
+          ...base,
+          toolUseId: e.tool_use_id,
+          agentId: base.agentId ?? result.agentId,
+          model: base.model ?? result.resolvedModel,
+          toolUses: result.totalToolUseCount,
+          durationMs: result.totalDurationMs,
+          cacheTtl: split.ttl ?? base.cacheTtl,
+        },
+        split.share1h,
+      )
       const out = { ...agents }
       // A row first filed under another key (found by its agent id) moves here.
       if (prev && prev.toolUseId !== e.tool_use_id) delete out[prev.toolUseId]
@@ -385,7 +403,12 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (e.agentId !== undefined) {
+      // A background subagent's row gets no Agent result to read its tool
+      // count from; count its calls here instead.
+      toolCalls.set(e.agentId, (toolCalls.get(e.agentId) ?? 0) + 1)
+      return next(e)
+    }
     const tool = String(e.tool)
     const input = e as unknown as Record<string, unknown>
     if (tool === 'AskUserQuestion') askedByTool = true
@@ -417,6 +440,8 @@ export const register: Register = (on, options) => {
       // A subagent's loop ended a turn: its usage covers that whole run.
       const agentId = e.agentId
       const tally = tallyOf(e.usage)
+      const calls = toolCalls.get(agentId) ?? 0
+      toolCalls.delete(agentId)
       const agents = await read($, agentsAtom)
       let type = 'agent'
       if (!rowFor(agents, agentId)) {
@@ -436,16 +461,27 @@ export const register: Register = (on, options) => {
           weighted: 0,
           turns: 0,
         }
-        const row = reweigh({
-          ...base,
-          usage: addTally(base.usage, tally),
-          usageModel: e.usage?.model ?? base.usageModel,
-          turns: base.turns + 1,
-          durationMs: base.durationMs ?? e.durationMs,
-        })
+        // A subagent continued with a message runs again under its id: the
+        // run adds to the row, its tools and time with it.
+        const isContinued = base.turns > 0
+        const row = addRun(
+          {
+            ...base,
+            toolUses: calls > 0 ? (base.toolUses ?? 0) + calls : base.toolUses,
+            durationMs: isContinued
+              ? (base.durationMs ?? 0) + e.durationMs
+              : (base.durationMs ?? e.durationMs),
+          },
+          tally,
+          e.usage?.model,
+        )
         return { ...current, [key]: row }
       })
-      dbg($, `subagent ${agentId} turn ${e.reason}: ${JSON.stringify(tally)} on ${e.usage?.model ?? '?'}`)
+      dbg(
+        $,
+        `subagent ${agentId} turn ${e.reason}: ${JSON.stringify(tally)} on ${e.usage?.model ?? '?'}, ` +
+          `${calls} tool call(s) seen, ${e.durationMs}ms`,
+      )
       return res
     }
 
@@ -489,7 +525,9 @@ export const register: Register = (on, options) => {
       percent: e.context.percent,
       window: e.context.window,
     }))
-    if (windows.length > 0) await update($, windowsAtom, () => windows)
+    // The windows the last response reported, whole: an empty list means none
+    // has a reading now (off a subscription, say), not "unchanged".
+    await update($, windowsAtom, () => windows)
 
     // The estimate.
     const five = windows.find(w => w.kind === FIVE_HOUR)
@@ -505,18 +543,35 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // The alerts, one of each per window.
-    const alerts = alertsFor(windows, cfg.th, await read($, warnedAtom), await read($, handedOffAtom))
+    // The alerts, one of each per window. A reading far under the thresholds
+    // means its window reset, which re-arms that kind.
+    const warned = await read($, warnedAtom)
+    const handedOff = await read($, handedOffAtom)
+    const warnedNow = rearm(warned, windows, cfg.th)
+    const handedOffNow = rearm(handedOff, windows, cfg.th)
+    if (warnedNow.length !== warned.length) await update($, warnedAtom, () => warnedNow)
+    if (handedOffNow.length !== handedOff.length) await update($, handedOffAtom, () => handedOffNow)
+
+    const alerts = alertsFor(windows, cfg.th, warnedNow, handedOffNow)
+    const due = alerts.filter(a => a.kind === 'handoff')
     for (const alert of alerts) {
-      if (alert.kind === 'warn') {
-        await update($, warnedAtom, keys => [...keys, alert.key])
-        $.ui.toast(warnToast(alert.window, cfg.th, cfg.lang), { timeoutMs: 8000 })
-        continue
+      if (alert.kind !== 'warn') continue
+      await update($, warnedAtom, keys => [...keys, alert.key])
+      $.ui.toast(warnToast(alert.window, cfg.th, cfg.lang), { timeoutMs: 8000 })
+    }
+    if (due.length > 0) {
+      await update($, handedOffAtom, keys => [...keys, ...due.map(a => a.key)])
+      // One request for every window due, joined with any still waiting to go
+      // out. (A request an earlier version left waiting names no windows: the
+      // new one, which asks the same, takes its place.)
+      const waiting = await read($, pendingAtom)
+      const named = mergeWindows(waiting?.windows ?? [], due.map(a => a.window))
+      const key = [waiting?.key, ...due.map(a => a.key)].filter(k => k).join(' + ')
+      const text = handoffNote(named, cfg.handoffPath, await $.session.cwd(), await $.clock.now())
+      await update($, pendingAtom, () => ({ key, text, windows: named }))
+      for (const alert of due) {
+        $.ui.toast(handoffToast(alert.window, cfg.handoffPath, cfg.lang), { timeoutMs: 10000 })
       }
-      await update($, handedOffAtom, keys => [...keys, alert.key])
-      const text = handoffNote(alert.window, cfg.handoffPath, await $.session.cwd(), await $.clock.now())
-      await update($, pendingAtom, () => ({ key: alert.key, text }))
-      $.ui.toast(handoffToast(alert.window, cfg.handoffPath, cfg.lang), { timeoutMs: 10000 })
       // Between turns the note can go in at once; during a turn it rides the
       // next tool result, or the turn's end.
       if (!isMainTurnRunning) await deliverByAppend($)
@@ -546,7 +601,8 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const windows = await read($, windowsAtom)
+    const now = await $.clock.now()
+    const windows = liveWindows(await read($, windowsAtom), now)
     const agents = Object.values(await read($, agentsAtom))
     const main = await read($, mainAtom)
     const compact = await read($, compactAtom)
@@ -556,7 +612,7 @@ export const register: Register = (on, options) => {
       windows,
       mainTokens: totalTokens(main.usage),
       agents,
-      now: await $.clock.now(),
+      now,
       lang: cfg.lang,
     })
     const isWarn = pastWarn(windows, cfg.th)

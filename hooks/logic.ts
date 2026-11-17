@@ -119,6 +119,41 @@ export function weigh(t: TokenTally, model: string | undefined, share1h = 0): nu
   )
 }
 
+/**
+ * A finished run of a subagent's loop (one `turn.complete`), added to its row.
+ * Earlier runs keep the weight they were given; this run is priced at its own
+ * model, with the cache split known so far.
+ */
+export function addRun(row: AgentRow, tally: TokenTally, model: string | undefined): AgentRow {
+  // A row an earlier version stored has no `run`: its weight stands as given.
+  const before = row.run
+    ? (row.weightedBefore ?? 0) + weigh(row.run, row.runModel, row.share1h ?? 0)
+    : row.weighted
+  const runModel = model ?? row.usageModel ?? row.model
+  return {
+    ...row,
+    usage: addTally(row.usage, tally),
+    usageModel: model ?? row.usageModel,
+    turns: row.turns + 1,
+    weightedBefore: before,
+    run: tally,
+    runModel,
+    weighted: before + weigh(tally, runModel, row.share1h ?? 0),
+  }
+}
+
+/**
+ * The cache split an Agent result reported, applied to the run it describes:
+ * the latest one. Earlier runs are not repriced.
+ */
+export function applySplit(row: AgentRow, share1h: number | undefined): AgentRow {
+  const s = share1h ?? row.share1h
+  if (!row.run) {
+    return { ...row, share1h: s, weighted: weigh(row.usage, row.usageModel ?? row.model, s ?? 0) }
+  }
+  return { ...row, share1h: s, weighted: (row.weightedBefore ?? 0) + weigh(row.run, row.runModel, s ?? 0) }
+}
+
 /** The cache TTL label and 1-hour share from an Agent result's last usage. */
 export function cacheSplit(
   creation: { ephemeral_1h_input_tokens: number; ephemeral_5m_input_tokens: number } | null | undefined,
@@ -148,12 +183,35 @@ export function sameWindow(a: string | undefined, b: string | undefined): boolea
   return Math.abs(ta - tb) < 10 * 60 * 1000
 }
 
-/** The key one alert is deduplicated by: one per window kind and reset. */
+/** The key a fired alert is kept under: the window's kind and reset time. */
 export function windowKey(w: WindowReading): string {
-  const t = w.resetsAt ? Date.parse(w.resetsAt) : NaN
-  // Round to ten minutes so a jittering reset time keeps one key.
-  const slot = Number.isNaN(t) ? 'none' : String(Math.round(t / 600_000))
-  return `${w.kind}@${slot}`
+  return `${w.kind}#${w.resetsAt ?? ''}`
+}
+
+/** Kind and reset time of a kept key, including the `kind@slot` keys of 0.1.0
+ * (the reset time rounded to ten minutes, or `none`). */
+function keyParts(key: string): { kind: string; resetsAt?: string } | undefined {
+  const hash = key.indexOf('#')
+  if (hash >= 0) {
+    const resetsAt = key.slice(hash + 1)
+    return resetsAt ? { kind: key.slice(0, hash), resetsAt } : { kind: key.slice(0, hash) }
+  }
+  const at = key.lastIndexOf('@')
+  if (at < 0) return undefined
+  const kind = key.slice(0, at)
+  const slot = key.slice(at + 1)
+  if (slot === 'none') return { kind }
+  const n = Number(slot)
+  return Number.isFinite(n) ? { kind, resetsAt: new Date(n * 600_000).toISOString() } : undefined
+}
+
+/** Whether an alert was already fired for this window: same kind, and reset
+ * times that `sameWindow` takes for one (or both absent). */
+export function hasFired(keys: readonly string[], w: WindowReading): boolean {
+  return keys.some(k => {
+    const p = keyParts(k)
+    return p !== undefined && p.kind === w.kind && sameWindow(p.resetsAt, w.resetsAt)
+  })
 }
 
 export type Thresholds = {
@@ -161,6 +219,40 @@ export type Thresholds = {
   handoffAt: number
   warnAt7d: number
   handoffAt7d: number
+}
+
+function thresholdsOf(kind: string, th: Thresholds): { warnAt: number; handoffAt: number } | undefined {
+  if (kind === FIVE_HOUR) return { warnAt: th.warnAt, handoffAt: th.handoffAt }
+  if (kind === SEVEN_DAY) return { warnAt: th.warnAt7d, handoffAt: th.handoffAt7d }
+  return undefined
+}
+
+/**
+ * Drops the kept keys of a window kind whose reading has fallen under half its
+ * warning threshold. A window's percentage falls only when it resets, which is
+ * how a window with no reset time is told from the last one. A kind with no
+ * reading keeps its keys: a missing reading is not a reset.
+ */
+export function rearm(keys: readonly string[], windows: readonly WindowReading[], th: Thresholds): string[] {
+  const low = new Set<string>()
+  for (const w of windows) {
+    const t = thresholdsOf(w.kind, th)
+    if (t && w.percentUsed < Math.min(t.warnAt, t.handoffAt) / 2) low.add(w.kind)
+  }
+  if (low.size === 0) return [...keys]
+  return keys.filter(k => {
+    const p = keyParts(k)
+    return p === undefined || !low.has(p.kind)
+  })
+}
+
+/** The readings still current: a window whose reset time has passed says
+ * nothing about the window that followed it. */
+export function liveWindows(windows: readonly WindowReading[], now: number): WindowReading[] {
+  return windows.filter(w => {
+    const t = w.resetsAt ? Date.parse(w.resetsAt) : NaN
+    return Number.isNaN(t) || t > now
+  })
 }
 
 export type Alert = { kind: 'warn' | 'handoff'; window: WindowReading; key: string }
@@ -177,25 +269,26 @@ export function alertsFor(
 ): Alert[] {
   const out: Alert[] = []
   for (const w of windows) {
-    let warnAt: number
-    let handoffAt: number
-    if (w.kind === FIVE_HOUR) {
-      warnAt = th.warnAt
-      handoffAt = th.handoffAt
-    } else if (w.kind === SEVEN_DAY) {
-      warnAt = th.warnAt7d
-      handoffAt = th.handoffAt7d
-    } else {
-      continue
-    }
+    const t = thresholdsOf(w.kind, th)
+    if (!t) continue
     const key = windowKey(w)
-    if (w.percentUsed >= handoffAt && !handedOff.includes(key)) {
+    const isHandedOff = hasFired(handedOff, w)
+    if (w.percentUsed >= t.handoffAt && !isHandedOff) {
       out.push({ kind: 'handoff', window: w, key })
-    } else if (w.percentUsed >= warnAt && !warned.includes(key) && !handedOff.includes(key)) {
+    } else if (w.percentUsed >= t.warnAt && !hasFired(warned, w) && !isHandedOff) {
       out.push({ kind: 'warn', window: w, key })
     }
   }
   return out
+}
+
+/** Windows of a handoff request still waiting, with newly due ones: one per
+ * kind, the newer reading kept, the 5-hour window first. */
+export function mergeWindows(pending: readonly WindowReading[], due: readonly WindowReading[]): WindowReading[] {
+  const byKind = new Map<string, WindowReading>()
+  for (const w of [...pending, ...due]) byKind.set(w.kind, w)
+  const order = (kind: string) => (kind === FIVE_HOUR ? 0 : kind === SEVEN_DAY ? 1 : 2)
+  return [...byKind.values()].sort((a, b) => order(a.kind) - order(b.kind))
 }
 
 /** True while any window is at or past its handoff threshold. */
@@ -443,7 +536,8 @@ export function bandLine(b: BandInput): string {
     ? `主会话 ${fmtTokens(b.mainTokens, b.lang)} / 子代理 ${fmtTokens(subTokens, b.lang)}`
     : `main ${fmtTokens(b.mainTokens, b.lang)} / subagents ${fmtTokens(subTokens, b.lang)} tokens`
   if (b.agents.length > 0) {
-    const fam = inherited.length > 0 ? familyOf(inherited[0]?.model) : ''
+    // Every family inherited, in the order first seen: "Opus", "Opus/Fable".
+    const fam = [...new Set(inherited.map(a => familyOf(a.model)))].join('/')
     if (zh) {
       tally += inherited.length > 0
         ? `（${b.agents.length} 个，${inherited.length} 个继承了 ${fam}）`
@@ -473,14 +567,18 @@ export function handoffToast(w: WindowReading, path: string, lang: Lang): string
     : `${label} quota at ${fmtPercent(w.percentUsed)}: Claude has been asked to write a handoff brief to ${path} and start no new large task.`
 }
 
-/** The note appended to the conversation when a window reaches handoffAt.
- * Written in English for the model either way; the brief follows the
- * conversation's language. */
-export function handoffNote(w: WindowReading, path: string, cwd: string, now: number): string {
-  const label = w.kind === FIVE_HOUR ? '5-hour' : '7-day'
-  const reset = fmtReset(w.resetsAt, now, 'en')
+/** The note appended to the conversation when windows reach handoffAt: one
+ * note for every window due. Written in English for the model either way; the
+ * brief follows the conversation's language. */
+export function handoffNote(windows: readonly WindowReading[], path: string, cwd: string, now: number): string {
+  const states = windows.map(w => {
+    const label = w.kind === FIVE_HOUR ? '5-hour' : '7-day'
+    const reset = fmtReset(w.resetsAt, now, 'en')
+    return `the ${label} usage window is at ${fmtPercent(w.percentUsed)}${reset ? ` (${reset})` : ''}`
+  })
+  const said = states.join(', and ')
   return [
-    `[subagent-cost] The ${label} usage window is at ${fmtPercent(w.percentUsed)}${reset ? ` (${reset})` : ''}.`,
+    `[subagent-cost] ${said.charAt(0).toUpperCase()}${said.slice(1)}.`,
     `Before your current turn ends, write a handoff brief to \`${path}\` (relative paths are relative to ${cwd}).`,
     'Use these sections, in this order: Goal; Decisions made; Done; In progress; Next steps; Key files (absolute paths); Open questions.',
     'Write it so a fresh session or another coding agent can continue from the file alone, in the language of this conversation.',

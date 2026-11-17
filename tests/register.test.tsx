@@ -16,6 +16,10 @@ type World = {
   context: SessionContextUsage
   agents: AgentInfo[]
   toolUseIds: string[]
+  /** What `$.store` holds across sessions. */
+  store: Map<string, unknown>
+  /** Agent types whose definition names a model of its own. */
+  ownModels: Record<string, string>
   clock: ReturnType<typeof mock.clock>
   session: ReturnType<typeof mock.session>
 }
@@ -29,6 +33,8 @@ function world(on: On): World {
     context: { tokens: 20_000, window: 1_000_000, percent: 2 },
     agents: [],
     toolUseIds: [],
+    store: new Map<string, unknown>(),
+    ownModels: { Explore: 'claude-haiku-5-5' },
     clock: mock.clock(on, { now: NOW }),
     session: mock.session(on),
   }
@@ -36,10 +42,10 @@ function world(on: On): World {
     w.toasts.push(e.text)
     return { value: undefined }
   })
-  const store = new Map<string, unknown>()
-  on('store.get', (_$, e) => ({ value: store.get(e.key) }))
+  on('ui.log', () => ({ value: undefined }))
+  on('store.get', (_$, e) => ({ value: w.store.get(e.key) }))
   on('store.set', (_$, e) => {
-    store.set(e.key, e.value)
+    w.store.set(e.key, e.value)
     return { value: undefined }
   })
   on('session.cwd', () => ({ value: '/work/demo' }))
@@ -56,7 +62,7 @@ function world(on: On): World {
     return { messages: [{ role: 'user', text: 'Summary of the work so far.', toolUses: [] }], tokensAfter: w.tokensAfter }
   })
   on('agent.spawn', (_$, e) => ({
-    model: e.model ?? (e.subagentType === 'Explore' ? 'claude-haiku-5-5' : e.parentModel),
+    model: e.model ?? w.ownModels[e.subagentType] ?? e.parentModel,
     agentId: `agent-${e.tool_use_id}`,
   }))
   on('tool.call', (_$, e) => {
@@ -279,6 +285,41 @@ test('downgrade applies from the second spawn of a type that inherited, and leav
   expect(w.toasts.length).toBe(1)
 })
 
+function spawnUnder($: Engine, id: string, subagentType = 'general-purpose') {
+  return $.agent.spawn({
+    tool_use_id: id,
+    prompt: 'look into the parser',
+    description: 'parser',
+    subagentType,
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: false,
+    fork: false,
+  })
+}
+
+test('what a type was seen to do is checked again after a week', { options: { subagentModelPolicy: 'downgrade:sonnet' } }, async ($, on) => {
+  const w = world(on)
+  expect((await spawnUnder($, 'gp-1')).model).toBe('claude-opus-5-5')
+  expect((await spawnUnder($, 'gp-2')).model).toBe('sonnet')
+
+  // The definition now names Haiku of its own. Within the week the record stands.
+  w.ownModels['general-purpose'] = 'claude-haiku-5-5'
+  expect((await spawnUnder($, 'gp-3')).model).toBe('sonnet')
+
+  // After it, one spawn runs unchanged and the type is learned again.
+  await w.clock.advance(8 * 24 * 3_600_000)
+  expect((await spawnUnder($, 'gp-4')).model).toBe('claude-haiku-5-5')
+  expect((await spawnUnder($, 'gp-5')).model).toBe('claude-haiku-5-5')
+})
+
+test('a record an earlier version stored is learned again', { options: { subagentModelPolicy: 'downgrade:sonnet' } }, async ($, on) => {
+  const w = world(on)
+  w.store.set('inherits:general-purpose', true)
+  expect((await spawnUnder($, 'gp-1')).model).toBe('claude-opus-5-5')
+  expect((await spawnUnder($, 'gp-2')).model).toBe('sonnet')
+})
+
 test('a spawn under a cheap main model teaches nothing', { options: { subagentModelPolicy: 'downgrade:sonnet' } }, async ($, on) => {
   world(on)
   const spawn = (id: string, parentModel: string) =>
@@ -346,6 +387,106 @@ test('the 7-day window has its own thresholds', { options: { warnAt7d: 50, hando
   expect(w.toasts[0]).toContain('7-day quota at 55%')
   await measure($, 20, 60)
   expect(w.session.appended().length).toBe(1)
+})
+
+test('both windows due at once: one request names both', async ($, on) => {
+  const w = world(on)
+  await measure($, 91, 92)
+  const rows = w.session.appended()
+  expect(rows.length).toBe(1)
+  const text = JSON.stringify(rows[0]?.message.content)
+  expect(text).toContain('5-hour usage window is at 91%')
+  expect(text).toContain('7-day usage window is at 92%')
+})
+
+test('a window that comes due before the first request went out joins it', async ($, on) => {
+  const w = world(on)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await measure($, 91, 10)
+  await measure($, 91, 92)
+  const res = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  const context = JSON.stringify(res.context ?? [])
+  expect(context).toContain('5-hour usage window is at 91%')
+  expect(context).toContain('7-day usage window is at 92%')
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(w.session.appended().length).toBe(0)
+})
+
+test('an empty reading clears the quota figures and holds nothing off', async ($, on) => {
+  const w = world(on)
+  w.context = BIG
+  await measure($, 92)
+  await $.session.measure({ context: BIG, rateLimits: [], changed: ['rateLimits'] })
+
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+  await mainTurn($, 't1', 'Done.')
+  const band = await ui.find({ type: 'Text', text: /main/ })
+  expect(band?.text).not.toContain('5h')
+  expect(band?.text).not.toContain('⚠')
+  await ui.unmount()
+
+  await w.clock.advance(2_000)
+  expect(w.compactions.length).toBe(1)
+})
+
+test('a reading whose reset time has passed holds nothing off', async ($, on) => {
+  const w = world(on)
+  w.context = BIG
+  await measure($, 92)
+  await w.clock.advance(2 * 3_600_000 + 60_000)
+  await mainTurn($, 't1', 'Done.')
+  await w.clock.advance(2_000)
+  expect(w.compactions.length).toBe(1)
+})
+
+test('a background subagent counts its own tool calls, and a continued run adds to its row', async ($, on) => {
+  world(on)
+  await $.agent.spawn({
+    tool_use_id: 'spawn-bg',
+    prompt: 'watch the build',
+    description: 'watch build',
+    subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' },
+    model: 'sonnet',
+    parentModel: 'claude-opus-5-5',
+    background: true,
+    fork: false,
+  })
+  const run = async (turnId: string, calls: number, durationMs: number) => {
+    for (let i = 0; i < calls; i++) {
+      await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'agent-spawn-bg' })
+    }
+    await $.turn.complete({
+      answer: 'checked',
+      durationMs,
+      isAborted: false,
+      turnId,
+      agentId: 'agent-spawn-bg',
+      reason: 'answer',
+      usage: {
+        model: 'claude-sonnet-5-5',
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_creation_input_tokens: 2_000,
+        cache_read_input_tokens: 3_000,
+      },
+    })
+  }
+  await run('bg-1', 2, 30_000)
+  await run('bg-2', 3, 15_000)
+
+  const ui = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'spawn-bg',
+    props: toolUseProps('spawn-bg'),
+  })
+  const line = await ui.find({ type: 'Text', text: /subagent general-purpose/ })
+  expect(line?.text).toContain('in 2k / out 1k / cache write 4k / cache read 6k')
+  expect(line?.text).toContain('5 tools')
+  expect(line?.text).toContain('45s')
+  await ui.unmount()
 })
 
 const BIG = { tokens: 200_000, window: 1_000_000, percent: 20 }

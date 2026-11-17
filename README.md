@@ -38,13 +38,15 @@ subagent Explore · claude-haiku-5-5 · in 12k / out 3k / cache write 41k (5m) /
 
 Subagent type, the model it actually ran on, input / output / cache-write (with the cache lifetime, 5m or 1h) / cache-read tokens, tool calls and duration. Once the estimate below has enough data, the line ends with `≈0.8% of 5h quota (estimate)`; until then it shows tokens only.
 
+A subagent that runs in the background returns no Agent result with these totals: the mod counts its tool calls itself, and its line has no cache lifetime. A subagent continued with a message (SendMessage) runs again under the same id; that run's tokens, tool calls and time are added to its original row.
+
 **Above the prompt**, one line:
 
 ```
 5h 63% (resets in 2h) · 7d 41% · main 123k / subagents 272k tokens (2, 1 inherited Opus)
 ```
 
-The 5-hour and 7-day usage and when the 5-hour window resets, tokens used by the main session and by its subagents, how many subagents ran, and how many of them inherited an expensive model. When Claude Code reports no usage windows, the line shows tokens only.
+The 5-hour and 7-day usage and when the 5-hour window resets, tokens used by the main session and by its subagents, how many subagents ran, and how many of them inherited an expensive model (`Opus/Fable` when there were several). When Claude Code reports no usage windows, the line shows tokens only; a reading whose reset time has passed is left out until a new one arrives.
 
 **A notice when a subagent inherits Opus, Fable or Mythos.** A subagent called without a `model` runs on whatever its own definition names, or on the main session's model when its definition names none. If that is an expensive model, a toast says so and how to avoid it.
 
@@ -71,7 +73,7 @@ In a session that the desktop app or the Agent SDK runs, Claude Code does not ye
 - At **88%** of the 5-hour window, the quota line turns into a warning and you get one toast.
 - At **90%**, Claude is asked to write a handoff brief to `HANDOFF.md` (relative to the session's folder) with these sections: Goal, Decisions made, Done, In progress, Next steps, Key files, Open questions, and to start no new large task in this window.
 
-Each fires once per window. The 7-day window has its own thresholds (also 88 / 90 by default). Below the thresholds the warnings add nothing to the conversation and spend no tokens.
+Each fires once per window. The 7-day window has its own thresholds (also 88 / 90 by default); when both windows are due at once, or one comes due before the other's request has gone out, Claude gets one request that names both. A window is told from the next by its reset time; where Claude Code reports none, by its percentage falling under half the warning threshold. Below the thresholds the warnings add nothing to the conversation and spend no tokens.
 
 How the request reaches Claude: during a turn, it is attached to the next tool result; between turns, it is added to the conversation as a message. In our test, a request added between turns was acted on with your next message, not before it.
 
@@ -82,10 +84,11 @@ How the request reaches Claude: during a turn, it is attached to the next tool r
 With `downgrade`, the mod passes `<model>` for subagents of a type that it has already seen running on the main session's model, while the main session is on Opus, Fable or Mythos. It learns this per subagent type, and remembers it across sessions:
 
 - The first spawn of a type is never changed; if it inherited, a toast says that later ones will run on `<model>`.
-- A type whose definition names its own model (Explore on Haiku, for instance) is left alone.
+- A type whose definition named its own model when it was seen (Explore on Haiku, for instance) is left alone.
 - A type whose definition names the same model as the main session counts as inheriting.
 - A `model` passed in the call is always kept. Forks are never changed.
 - It learns only from spawns it did not rewrite while the main session was on Opus, Fable or Mythos (under `warn` or `off`, or before a type is known). Spawns under a cheaper main model teach it nothing, since a type with Haiku of its own looks the same as one that inherits Haiku.
+- Claude Code does not tell a mod what a type's definition names, so a definition you change is noticed only when the type is seen again. What was seen of a type stands for 7 days; after that, one spawn of the type runs unchanged and the type is learned again. To have it learned at once (say, after giving an agent a `model` of its own), set the policy to `warn`, run one subagent of that type under Opus, Fable or Mythos, and set it back.
 
 ## Settings
 
@@ -116,7 +119,7 @@ This assumes:
 
 - **One session on the account.** Other sessions, other devices or claude.ai use move the same percentage, so the rate comes out too high and every share with it.
 - **List-price ratios match how the plan counts usage.** Anthropic does not publish how plan usage is computed; if the ratios differ, shares are off by the same factor.
-- **Main-loop cache writes are priced as 5-minute writes.** For subagents the split between 5-minute and 1-hour writes comes from the Agent tool result; for the main loop it is not available to the mod.
+- **Cache writes are split by the one figure the mod gets.** For a subagent, the split between 5-minute and 1-hour writes comes from the Agent tool result, which reports the run's last request; the mod applies it to that whole run. Each run is priced at its own model when it ends, and a later run does not reprice an earlier one. A background subagent's writes, and the main loop's, are priced as 5-minute writes: the mod gets no split for them.
 - **The percentage is coarse.** With a 2-point move, rounding alone can shift the rate by tens of percent.
 
 Treat the share as an order of magnitude: useful to see that one subagent cost ten times another, not to tell 0.8% from 1.1%.
@@ -124,7 +127,7 @@ Treat the share as an order of magnitude: useful to see that one subagent cost t
 ## What it keeps and what it reads
 
 - Per session (Claude Code's plugin state): the rows, the token totals, the latest usage readings, the estimate's baseline and rate, which warnings have fired.
-- Across sessions (the plugin's own store): for each subagent type, whether it was seen inheriting the main model (`inherits:<type>`).
+- Across sessions (the plugin's own store): for each subagent type, whether it was seen inheriting the main model, and when (`inherits:<type>`).
 - It reads only what Claude Code passes to mods, and makes no network requests of its own. It reads no credentials.
 - The only file it writes is its own store, through Claude Code's `$.store`. The handoff brief is written by Claude, not by the mod.
 - It changes the conversation in two ways only: the compaction, and the handoff request it adds.
@@ -147,11 +150,20 @@ As of 2026-11-16. Descriptions are taken from each project's own README or repos
 
 Where this mod differs: it puts each finished subagent's token split and actual model under that subagent's own row; it states usage as a share of the 5-hour window rather than in dollars, and labels that share as an estimate; it compacts only after a turn that ended with an answer; it writes the handoff to a file with fixed sections; and it never refuses a subagent. It has no forecast, no pane and no dashboard.
 
-A status-line tool draws in a terminal session. We have not checked whether the desktop app's Code tab runs a custom status line; our guess is that it does not, in which case those tools show nothing there. A mod's rows are drawn for the desktop app according to Claude Code's plugin documentation; we have not checked that on screen either.
+A status-line tool draws in a terminal session. We have not checked whether the desktop app's Code tab runs a custom status line; our guess is that it does not, in which case those tools show nothing there. A mod's rows are drawn for the desktop app according to Claude Code's plugin documentation; we have seen this mod's rows on screen in a terminal session, not in the desktop app.
 
 ## What has been tested, and what has not
 
-As of v0.1.0. The unit and engine tests pass (34 tests, `claude plugin test`). Beyond those, the mod was run in throwaway headless sessions (`claude -p` with `--plugin-dir`, Claude Code 2.1.325, Haiku as the main model), with low thresholds set for the test. There:
+As of v0.1.1. The unit and engine tests pass (49 tests, `claude plugin test`). Beyond those, the mod was run in throwaway sessions started with `--plugin-dir` (Claude Code 2.1.325, Haiku as the main model), with thresholds set for the test.
+
+Run on v0.1.1:
+
+- **On screen, in an interactive terminal session.** While a background Explore subagent ran, the line under its row read `subagent Explore · claude-haiku-5-5 · usage pending`; once it finished, `subagent Explore · claude-haiku-5-5 · in 4 / out 508 / cache write 21.1k / cache read 20.1k · 2 tools · 5s`, the tool count being the mod's own. The line above the prompt showed the 5-hour and 7-day percentages, the 5-hour reset and the token totals, with Claude Code's own notices still drawn.
+- **Both windows due at once** (headless, both handoff thresholds set to 1%): one request named both windows, rode the next tool result, and Claude wrote the brief.
+- **A subagent that was not backgrounded:** the tool count from the Agent result (3) matched the mod's own count.
+- No hook of the mod was skipped or refused in either debug log.
+
+Carried over from the v0.1.0 headless runs:
 
 - the 5-hour percentage and its reset time arrived from Claude Code;
 - at the handoff threshold the toast fired, the request was added between turns, and with the next message Claude wrote the brief with the seven sections;
@@ -161,10 +173,10 @@ As of v0.1.0. The unit and engine tests pass (34 tests, `claude plugin test`). B
 
 Not tested:
 
-- **Drawing.** Headless sessions draw nothing, so the subagent row, the quota line and the button have not been seen on screen, in the terminal or in the desktop app.
+- **The desktop app's drawing.** Only the terminal was looked at; the **Compact context** button (`autoCompact: ask`) has not been seen on screen anywhere.
 - **Compaction between turns in an interactive terminal session** (the direct path, not the queued `/compact`).
-- **The estimate.** Its error is unknown (see above), and no test session moved the 5-hour percentage the 2 points needed for a rate.
-- **A subagent that is not backgrounded**, where tool count and duration come from the Agent result.
+- **The estimate.** Its error is unknown (see above). In one test session the 5-hour percentage moved 2 points and a rate appeared, but other sessions were using the same account at the time, so that rate was too high.
+- **A subagent continued with SendMessage, and the 7-day re-check of a subagent type:** unit tests only.
 - **The question heuristic** can miss a question that does not end in a question mark, and can treat a rhetorical last line as a question.
 
 ## Related

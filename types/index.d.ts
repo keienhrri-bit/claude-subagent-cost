@@ -33,6 +33,11 @@ export type AgentRow = {
   /** USD-equivalent of `usage` at list prices (see hooks/logic.ts). */
   weighted: number
   turns: number
+  /** Weight of the runs before the latest, each priced when it ended. */
+  weightedBefore?: number
+  /** The latest run's tokens and model, which an Agent result's cache split prices. */
+  run?: TokenTally
+  runModel?: string
   cacheTtl?: '5m' | '1h' | 'mixed'
   share1h?: number
   toolUses?: number
@@ -73,6 +78,8 @@ export type CompactState = {
 export type PendingNote = {
   key: string
   text: string
+  /** The windows it names; a window that comes due before it goes out joins it. */
+  windows?: WindowReading[]
 }
 
 export type ContextReading = {

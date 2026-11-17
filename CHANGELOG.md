@@ -1,8 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 (2026-11-17)
 
-- README: a Related section linking claude-code-usage-audit and agent-cite-check.
+Fixes from a code review.
+
+- Handoff: when the 5-hour and 7-day windows come due together, or one comes due before the other's request has gone out, Claude gets one request naming both; before, the later request replaced the earlier one.
+- Alerts: a window is matched by its reset time with a tolerance, so a reset time that moves by seconds across a ten-minute mark no longer fires a warning or handoff twice. Where Claude Code gives no reset time, a reading under half the warning threshold starts a new window, so the next one alerts again.
+- Quota line and compaction: an empty usage reading now clears the old one, and a reading whose reset time has passed is ignored, so a stale 90% no longer shows or holds compaction off.
+- Estimate: each subagent run is priced at its own model when it ends; a later run's model or cache split no longer reprices earlier runs.
+- `downgrade`: what was seen of a subagent type is checked again after 7 days, so a type whose definition later names its own model is not overridden for good; records from 0.1.0 are learned again.
+- Background subagents: the mod counts their tool calls, and a subagent continued with SendMessage adds its time and tools to its row.
+- The quota line names every inherited family (`Opus/Fable`), not only the first.
+- README: a Related section linking claude-code-usage-audit and agent-cite-check; tested and untested parts brought up to date.
+
+Tested: 49 unit and engine tests; in throwaway sessions, the rows on screen in a terminal session and the combined handoff request. Not tested: drawing in the desktop app, and the estimate's error.
 
 ## 0.1.0 (2026-11-16)
 
