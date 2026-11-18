@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 (2026-11-18)
+
+- Keep downstream `AbovePrompt` content visible when drawing the quota bar.
+- Deduplicate quota alerts when reset times are blank or temporarily missing. A low reading preserves records with a known reset time. Expired readings are skipped for alerts, handoff requests, and the estimate.
+- Claim and merge handoff windows through one state record. Keep undelivered requests available for retry and preserve the text of pending requests from 0.1.0.
+- Price continued subagent runs without their own cache split as 5-minute writes. Hide the cache-lifetime label when the total includes writes with an unknown split.
+- Show zero tools for a completed background run and retain its running tool count across plugin reloads.
+- State the main-model and spawn conditions for rechecking a subagent's inheritance immediately in the plugin settings.
+
 ## 0.1.1 (2026-11-17)
 
 Fixes from a code review.

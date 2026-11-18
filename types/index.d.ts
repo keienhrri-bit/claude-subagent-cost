@@ -44,6 +44,12 @@ export type AgentRow = {
   durationMs?: number
 }
 
+/** Tool calls in the current run, held by the session across mod reloads. */
+export type AgentToolRun = {
+  turnId?: string
+  count: number
+}
+
 export type MainTally = {
   usage: TokenTally
   weighted: number
@@ -74,12 +80,24 @@ export type CompactState = {
   holdUntilTurn?: number
 }
 
-/** A handoff request waiting to reach the model. */
+/** Handoff request stored by 0.1.0 or 0.1.1. */
 export type PendingNote = {
   key: string
   text: string
   /** The windows it names; a window that comes due before it goes out joins it. */
   windows?: WindowReading[]
+}
+
+export type HandoffBatch = {
+  windows: WindowReading[]
+  legacy?: PendingNote
+}
+
+export type QuotaAlerts = {
+  warned: string[]
+  handedOff: string[]
+  waiting: HandoffBatch | null
+  sending: HandoffBatch | null
 }
 
 export type ContextReading = {
@@ -92,6 +110,7 @@ declare module 'claude-code' {
   interface PluginState {
     'subagent-cost': {
       agents: Record<string, AgentRow>
+      agentToolRuns: Record<string, AgentToolRun>
       main: MainTally
       windows: WindowReading[]
       context: ContextReading
@@ -100,6 +119,7 @@ declare module 'claude-code' {
       warned: string[]
       handedOff: string[]
       pendingNote: PendingNote | null
+      quotaAlerts: QuotaAlerts | null
       compact: CompactState
     }
   }

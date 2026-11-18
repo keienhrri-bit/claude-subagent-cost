@@ -122,13 +122,12 @@ export function weigh(t: TokenTally, model: string | undefined, share1h = 0): nu
 /**
  * A finished run of a subagent's loop (one `turn.complete`), added to its row.
  * Earlier runs keep the weight they were given; this run is priced at its own
- * model, with the cache split known so far.
+ * model. An Agent result that arrived early only describes the first run.
  */
 export function addRun(row: AgentRow, tally: TokenTally, model: string | undefined): AgentRow {
-  // A row an earlier version stored has no `run`: its weight stands as given.
-  const before = row.run
-    ? (row.weightedBefore ?? 0) + weigh(row.run, row.runModel, row.share1h ?? 0)
-    : row.weighted
+  const before = row.weighted
+  const firstRun = row.turns === 0
+  const share1h = firstRun ? row.share1h : undefined
   const runModel = model ?? row.usageModel ?? row.model
   return {
     ...row,
@@ -138,7 +137,9 @@ export function addRun(row: AgentRow, tally: TokenTally, model: string | undefin
     weightedBefore: before,
     run: tally,
     runModel,
-    weighted: before + weigh(tally, runModel, row.share1h ?? 0),
+    cacheTtl: firstRun ? row.cacheTtl : undefined,
+    share1h,
+    weighted: before + weigh(tally, runModel, share1h),
   }
 }
 
@@ -184,16 +185,18 @@ export function sameWindow(a: string | undefined, b: string | undefined): boolea
 }
 
 /** The key a fired alert is kept under: the window's kind and reset time. */
-export function windowKey(w: WindowReading): string {
+type WindowIdentity = Pick<WindowReading, 'kind' | 'resetsAt'>
+
+export function windowKey(w: WindowIdentity): string {
   return `${w.kind}#${w.resetsAt ?? ''}`
 }
 
 /** Kind and reset time of a kept key, including the `kind@slot` keys of 0.1.0
  * (the reset time rounded to ten minutes, or `none`). */
-function keyParts(key: string): { kind: string; resetsAt?: string } | undefined {
+function keyParts(key: string): WindowIdentity | undefined {
   const hash = key.indexOf('#')
   if (hash >= 0) {
-    const resetsAt = key.slice(hash + 1)
+    const resetsAt = key.slice(hash + 1).trim()
     return resetsAt ? { kind: key.slice(0, hash), resetsAt } : { kind: key.slice(0, hash) }
   }
   const at = key.lastIndexOf('@')
@@ -201,16 +204,40 @@ function keyParts(key: string): { kind: string; resetsAt?: string } | undefined 
   const kind = key.slice(0, at)
   const slot = key.slice(at + 1)
   if (slot === 'none') return { kind }
-  const n = Number(slot)
-  return Number.isFinite(n) ? { kind, resetsAt: new Date(n * 600_000).toISOString() } : undefined
+  const reset = new Date(Number(slot) * 600_000)
+  return Number.isFinite(reset.valueOf()) ? { kind, resetsAt: reset.toISOString() } : undefined
 }
 
-/** Whether an alert was already fired for this window: same kind, and reset
- * times that `sameWindow` takes for one (or both absent). */
-export function hasFired(keys: readonly string[], w: WindowReading): boolean {
-  return keys.some(k => {
-    const p = keyParts(k)
-    return p !== undefined && p.kind === w.kind && sameWindow(p.resetsAt, w.resetsAt)
+/** A rounded 0.1.0 key can precede the actual reset by up to five minutes. */
+export function isLiveAlertKey(key: string, now: number): boolean {
+  const reset = Date.parse(keyParts(key)?.resetsAt ?? '')
+  const rounding = key.includes('#') ? 0 : 300_000
+  return Number.isNaN(reset) || reset + rounding > now
+}
+
+/** Attach the first available reset time to a previously undated window. */
+export function rememberReset<T extends WindowIdentity>(w: T, readings: readonly WindowReading[]): T {
+  if (w.resetsAt) return w
+  const resetsAt = readings.find(r => r.kind === w.kind && r.resetsAt)?.resetsAt
+  return resetsAt ? { ...w, resetsAt } : w
+}
+
+export function rememberResets(keys: readonly string[], readings: readonly WindowReading[]): string[] {
+  return keys.map(key => {
+    const parts = keyParts(key)
+    const dated = parts && rememberReset(parts, readings)
+    return dated !== parts && dated ? windowKey(dated) : key
+  })
+}
+
+/** A missing reset time can still refer to a dated window that is live. */
+export function hasFired(keys: readonly string[], w: WindowReading, now?: number): boolean {
+  return keys.some(key => {
+    const p = keyParts(key)
+    return p !== undefined && p.kind === w.kind && (
+      sameWindow(p.resetsAt, w.resetsAt) ||
+      (!w.resetsAt && now !== undefined && p.resetsAt !== undefined && isLiveAlertKey(key, now))
+    )
   })
 }
 
@@ -227,22 +254,18 @@ function thresholdsOf(kind: string, th: Thresholds): { warnAt: number; handoffAt
   return undefined
 }
 
-/**
- * Drops the kept keys of a window kind whose reading has fallen under half its
- * warning threshold. A window's percentage falls only when it resets, which is
- * how a window with no reset time is told from the last one. A kind with no
- * reading keeps its keys: a missing reading is not a reset.
- */
+/** A low reading without a reset time can rearm an undated window. Dated
+ * records retain their identity even if the reported percentage falls. */
 export function rearm(keys: readonly string[], windows: readonly WindowReading[], th: Thresholds): string[] {
   const low = new Set<string>()
   for (const w of windows) {
     const t = thresholdsOf(w.kind, th)
-    if (t && w.percentUsed < Math.min(t.warnAt, t.handoffAt) / 2) low.add(w.kind)
+    if (!w.resetsAt && t && w.percentUsed < Math.min(t.warnAt, t.handoffAt) / 2) low.add(w.kind)
   }
   if (low.size === 0) return [...keys]
   return keys.filter(k => {
     const p = keyParts(k)
-    return p === undefined || !low.has(p.kind)
+    return p === undefined || p.resetsAt !== undefined || !low.has(p.kind)
   })
 }
 
@@ -266,16 +289,17 @@ export function alertsFor(
   th: Thresholds,
   warned: readonly string[],
   handedOff: readonly string[],
+  now?: number,
 ): Alert[] {
   const out: Alert[] = []
   for (const w of windows) {
     const t = thresholdsOf(w.kind, th)
     if (!t) continue
     const key = windowKey(w)
-    const isHandedOff = hasFired(handedOff, w)
+    const isHandedOff = hasFired(handedOff, w, now)
     if (w.percentUsed >= t.handoffAt && !isHandedOff) {
       out.push({ kind: 'handoff', window: w, key })
-    } else if (w.percentUsed >= t.warnAt && !hasFired(warned, w) && !isHandedOff) {
+    } else if (w.percentUsed >= t.warnAt && !hasFired(warned, w, now) && !isHandedOff) {
       out.push({ kind: 'warn', window: w, key })
     }
   }
@@ -570,15 +594,23 @@ export function handoffToast(w: WindowReading, path: string, lang: Lang): string
 /** The note appended to the conversation when windows reach handoffAt: one
  * note for every window due. Written in English for the model either way; the
  * brief follows the conversation's language. */
-export function handoffNote(windows: readonly WindowReading[], path: string, cwd: string, now: number): string {
+export function handoffNote(
+  windows: readonly WindowReading[],
+  path: string,
+  cwd: string,
+  now: number,
+  legacyText?: string,
+): string {
   const states = windows.map(w => {
     const label = w.kind === FIVE_HOUR ? '5-hour' : '7-day'
     const reset = fmtReset(w.resetsAt, now, 'en')
     return `the ${label} usage window is at ${fmtPercent(w.percentUsed)}${reset ? ` (${reset})` : ''}`
   })
   const said = states.join(', and ')
+  const header = `[subagent-cost] ${said.charAt(0).toUpperCase()}${said.slice(1)}.`
+  if (legacyText) return legacyText + '\n\n' + header
   return [
-    `[subagent-cost] ${said.charAt(0).toUpperCase()}${said.slice(1)}.`,
+    header,
     `Before your current turn ends, write a handoff brief to \`${path}\` (relative paths are relative to ${cwd}).`,
     'Use these sections, in this order: Goal; Decisions made; Done; In progress; Next steps; Key files (absolute paths); Open questions.',
     'Write it so a fresh session or another coding agent can continue from the file alone, in the language of this conversation.',

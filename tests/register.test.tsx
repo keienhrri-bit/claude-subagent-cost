@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { AgentInfo, On, SessionContextUsage, SessionRateLimit } from 'claude-code'
+import type { AgentInfo, EventResult, On, SessionContextUsage, SessionRateLimit } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
 // Everything here is made up: no real session, account or path.
@@ -16,6 +16,7 @@ type World = {
   context: SessionContextUsage
   agents: AgentInfo[]
   toolUseIds: string[]
+  cwd: () => EventResult<'session.cwd'> | Promise<EventResult<'session.cwd'>>
   /** What `$.store` holds across sessions. */
   store: Map<string, unknown>
   /** Agent types whose definition names a model of its own. */
@@ -33,6 +34,7 @@ function world(on: On): World {
     context: { tokens: 20_000, window: 1_000_000, percent: 2 },
     agents: [],
     toolUseIds: [],
+    cwd: () => ({ value: '/work/demo' }),
     store: new Map<string, unknown>(),
     ownModels: { Explore: 'claude-haiku-5-5' },
     clock: mock.clock(on, { now: NOW }),
@@ -48,7 +50,7 @@ function world(on: On): World {
     w.store.set(e.key, e.value)
     return { value: undefined }
   })
-  on('session.cwd', () => ({ value: '/work/demo' }))
+  on('session.cwd', () => w.cwd())
   on('session.usage', () => ({
     value: { startedAt: NOW, context: w.context, rateLimits: [] },
   }))
@@ -104,9 +106,13 @@ function limits(five: number, seven = 10): SessionRateLimit[] {
 }
 
 async function measure($: Engine, five: number, seven = 10, context?: SessionContextUsage) {
+  await measureLimits($, limits(five, seven), context)
+}
+
+async function measureLimits($: Engine, rateLimits: SessionRateLimit[], context?: SessionContextUsage) {
   await $.session.measure({
     context: context ?? { tokens: 20_000, window: 1_000_000, percent: 2 },
-    rateLimits: limits(five, seven),
+    rateLimits,
     changed: ['rateLimits'],
   })
 }
@@ -188,6 +194,22 @@ function toolUseProps(id: string) {
     isInterrupted: false,
   }
 }
+
+test('the quota band preserves the next AbovePrompt render', async ($, on) => {
+  world(on)
+  on('ui.render', { component: 'AbovePrompt', plugin: PLUGIN }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>Downstream notice</Text>
+  })
+  await measure($, 30)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: BAND_PROPS })
+    expect((await ui.find({ type: 'Text', text: /5h 30%/ }))?.text).toContain('5h 30%')
+    expect((await ui.find({ type: 'Text', text: 'Downstream notice' }))?.text).toBe('Downstream notice')
+    await ui.unmount()
+  }
+})
 
 test('a subagent row shows tokens alone until the estimate has two points', async ($, on) => {
   const w = world(on)
@@ -412,6 +434,177 @@ test('a window that comes due before the first request went out joins it', async
   expect(w.session.appended().length).toBe(0)
 })
 
+test('a low reading does not rearm a window with the same reset time', async ($, on) => {
+  const w = world(on)
+  for (const percent of [88, 3, 89, 91, 3, 91]) await measure($, percent)
+  expect(w.toasts.length).toBe(2)
+  expect(w.session.appended().length).toBe(1)
+})
+
+test('blank reset times share the undated alert key', async ($, on) => {
+  const w = world(on)
+  for (const resetsAt of ['', '', '  ', undefined]) {
+    await measureLimits($, [{ kind: 'five_hour', percentUsed: 91, resetsAt }])
+  }
+  expect(w.toasts.length).toBe(1)
+  expect(w.session.appended().length).toBe(1)
+})
+
+test('a reset time appearing or disappearing does not repeat an alert in the same window', async ($, on) => {
+  const w = world(on)
+  const bare = (kind: string) => ({ kind, percentUsed: 91 })
+  await measureLimits($, [bare('five_hour'), limits(20, 91)[1]!])
+  await measureLimits($, [limits(91)[0]!, bare('seven_day')])
+  await measure($, 91, 91)
+
+  expect(w.session.appended().length).toBe(1)
+  expect(w.toasts.length).toBe(2)
+
+  await w.clock.advance(2 * 3_600_000 + 1)
+  await measureLimits($, [bare('five_hour'), bare('seven_day')])
+  const rows = w.session.appended()
+  expect(rows.length).toBe(2)
+  expect(JSON.stringify(rows[1]?.message.content)).toContain('5-hour usage window')
+  expect(JSON.stringify(rows[1]?.message.content)).not.toContain('7-day usage window')
+})
+
+test('an expired reading is ignored before estimating or scheduling a handoff', async ($, on) => {
+  const w = world(on)
+  let estimated = false
+  on('state.set', { plugin: PLUGIN, key: 'baseline' }, (_$, e, next) => {
+    estimated = true
+    return next(e)
+  })
+  await w.clock.advance(2 * 3_600_000 + 1)
+  await measure($, 92)
+  expect(w.session.appended().length).toBe(0)
+  expect(w.toasts.length).toBe(0)
+  expect(estimated).toBe(false)
+
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 10, resetsAt: '2026-01-01T20:00:00.000Z' }])
+  expect(estimated).toBe(true)
+})
+
+test('an expired pending window is left out of the next handoff request', async ($, on) => {
+  const w = world(on)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await measure($, 91)
+  await w.clock.advance(2 * 3_600_000 + 1)
+  await measure($, 91, 92)
+  const res = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  const context = (res.context ?? []).join('\n')
+  expect(context).toContain('7-day usage window is at 92%')
+  expect(context).not.toContain('5-hour usage window')
+})
+
+test('a tool result and an overlapping measurement deliver each window once', async ($, on) => {
+  const w = world(on)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await measure($, 91)
+  let enter!: () => void
+  let release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  const released = new Promise<void>(resolve => { release = resolve })
+  let hold = true
+  w.cwd = async () => {
+    if (hold) {
+      hold = false
+      enter()
+      await released
+    }
+    return { value: '/work/demo' }
+  }
+
+  const measuring = measure($, 91, 92)
+  await Promise.race([measuring, entered])
+  hold = false
+  const first = await $.tool.call({ tool: 'Bash', command: 'ls' }).finally(release)
+  await measuring
+  const second = await $.tool.call({ tool: 'Bash', command: 'pwd' })
+  const text = [...(first.context ?? []), ...(second.context ?? [])].join('\n')
+  expect(text.match(/5-hour usage window/g)?.length).toBe(1)
+  expect(text.match(/7-day usage window/g)?.length).toBe(1)
+})
+
+test('two simultaneous tool results carry the queued handoff only once', async ($, on) => {
+  world(on)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await measure($, 91)
+  const results = await Promise.all([
+    $.tool.call({ tool: 'Bash', command: 'ls' }),
+    $.tool.call({ tool: 'Bash', command: 'pwd' }),
+  ])
+  expect(results.flatMap(result => result.context ?? []).length).toBe(1)
+})
+
+test('a handoff request stays pending when its working directory cannot be read', async ($, on) => {
+  const w = world(on)
+  w.cwd = () => ({ deny: 'cwd unavailable' })
+  await measure($, 91)
+  expect(w.session.appended().length).toBe(0)
+
+  w.cwd = () => ({ value: '/work/demo' })
+  await mainTurn($, 't1', 'Done.')
+  expect(w.session.appended().length).toBe(1)
+  expect(JSON.stringify(w.session.appended()[0]?.message.content)).toContain('5-hour usage window is at 91%')
+})
+
+test('a refused append keeps both its claimed window and one queued meanwhile', async ($, on) => {
+  let enter!: () => void
+  let release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  const released = new Promise<void>(resolve => { release = resolve })
+  let appendStarted = false
+  on('session.append', { door: 'note' }, async (_$, e, next) => {
+    if (appendStarted) return next(e)
+    appendStarted = true
+    enter()
+    await released
+    return { deny: 'test refusal' }
+  })
+  const w = world(on)
+
+  const measuring = measure($, 91)
+  await Promise.race([entered, measuring])
+  expect(appendStarted).toBe(true)
+  try {
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await measure($, 91, 92)
+  } finally {
+    release()
+  }
+  await measuring
+  expect(w.session.appended().length).toBe(0)
+  const res = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  const text = (res.context ?? []).join('\n')
+  expect(text).toContain('5-hour usage window is at 91%')
+  expect(text).toContain('7-day usage window is at 92%')
+})
+
+test('a legacy pending handoff keeps its text when another window comes due', async ($, on) => {
+  const w = world(on)
+  const key = 'five_hour@' + Math.round(Date.parse(RESET_5H) / 600_000)
+  const legacy = { key, text: '[subagent-cost] The 5-hour usage window is at 91%. Write the handoff brief.' }
+  let readLegacy = false
+  on('state.get', { plugin: PLUGIN, key: 'pendingNote' }, async (_$, e, next) => {
+    const stored = await next(e)
+    if (stored.value?.version !== 0) return stored
+    readLegacy = true
+    return { value: { version: 0, value: legacy } }
+  })
+  on('state.get', { plugin: PLUGIN, key: 'handedOff' }, async (_$, e, next) => {
+    const stored = await next(e)
+    return stored.value?.version === 0 ? { value: { version: 0, value: [key] } } : stored
+  })
+  await measure($, 91, 92)
+  expect(readLegacy).toBe(true)
+  expect(w.session.appended().length).toBe(1)
+  const text = JSON.stringify(w.session.appended()[0]?.message.content)
+  expect(text).toContain(legacy.text)
+  expect(text.match(/5-hour usage window/g)?.length).toBe(1)
+  expect(text).toContain('7-day usage window is at 92%')
+})
+
 test('an empty reading clears the quota figures and holds nothing off', async ($, on) => {
   const w = world(on)
   w.context = BIG
@@ -468,6 +661,96 @@ test('an Agent result that arrives before the run ends is not counted twice', as
   const line = await ui.find({ type: 'Text', text: /subagent Explore/ })
   expect(line?.text).toContain('23 tools')
   expect(line?.text).toContain('41s')
+  await ui.unmount()
+})
+
+test('a background subagent can complete with zero tools', async ($, on) => {
+  world(on)
+  await $.agent.spawn({
+    tool_use_id: 'spawn-zero',
+    prompt: 'check the calculation',
+    description: 'check calculation',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: true,
+    fork: false,
+  })
+  await $.turn.complete({
+    answer: 'checked',
+    durationMs: 1_000,
+    isAborted: false,
+    turnId: 'zero-1',
+    agentId: 'agent-spawn-zero',
+    reason: 'answer',
+    usage: {
+      model: 'claude-haiku-5-5',
+      input_tokens: 20,
+      output_tokens: 5,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+  })
+  const ui = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'spawn-zero',
+    props: toolUseProps('spawn-zero'),
+  })
+  expect((await ui.find({ type: 'Text', text: /subagent Explore/ }))?.text).toContain('0 tools')
+  await ui.unmount()
+})
+
+test('a background run restores and clears its unsettled tool count from session state', async ($, on) => {
+  world(on)
+  const agentId = 'agent-spawn-restored'
+  on('state.get', { plugin: PLUGIN, key: 'agentToolRuns' }, async (_$, e, next) => {
+    const stored = await next(e)
+    if (stored.value?.version !== 0) return stored
+    return { value: { version: 0, value: { [agentId]: { turnId: 'bg-before-reload', count: 2 } } } }
+  })
+  await $.agent.spawn({
+    tool_use_id: 'spawn-restored',
+    prompt: 'check the build',
+    description: 'check build',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: true,
+    fork: false,
+  })
+  const finish = (turnId: string) => $.turn.complete({
+    answer: 'checked',
+    durationMs: 1_000,
+    isAborted: false,
+    turnId,
+    agentId,
+    reason: 'answer',
+    usage: {
+      model: 'claude-haiku-5-5',
+      input_tokens: 20,
+      output_tokens: 5,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+  })
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId })
+  await finish('bg-before-reload')
+  const ui = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'spawn-restored',
+    props: toolUseProps('spawn-restored'),
+  })
+  const line = () => ui.find({ type: 'Text', text: /subagent Explore/ })
+  expect((await line())?.text).toContain('3 tools')
+
+  await $.turn.start({ text: 'check again', turnId: 'bg-next-run', agentId })
+  await $.tool.call({ tool: 'Bash', command: 'pwd', agentId })
+  await finish('bg-next-run')
+  expect((await line())?.text).toContain('4 tools')
   await ui.unmount()
 })
 

@@ -1,6 +1,6 @@
 {
   "name": "subagent-cost",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Shows what each subagent cost and how much of your 5-hour and 7-day quota is used, compacts after a finished task, and asks Claude for a handoff brief before the quota runs out.",
   "author": { "name": "keienhrri-bit" },
   "license": "MIT",
@@ -18,7 +18,7 @@
     "subagentModelPolicy": {
       "type": "string",
       "title": "Subagent model policy",
-      "description": "warn: a notice when a subagent runs on an inherited Opus/Fable/Mythos model. off: no notice. downgrade:<model> (e.g. downgrade:sonnet): once a subagent type has been seen running on an Opus/Fable/Mythos main session's model with no model passed, later subagents of that type run on <model> instead. The first spawn of each type is not changed, a model passed in the call is kept, and a type whose definition names the same model as the main session counts as inheriting. What was seen of a type is checked again after 7 days, or at once by one spawn of that type under warn or off.",
+      "description": "warn: a notice when a subagent runs on an inherited Opus/Fable/Mythos model. off: no notice. downgrade:<model> (e.g. downgrade:sonnet): once a subagent type has been seen running on an Opus/Fable/Mythos main session's model with no model passed, later subagents of that type run on <model> instead. The first spawn of each type is not changed, a model passed in the call is kept, and a type whose definition names the same model as the main session counts as inheriting. What was seen of a type is checked again after 7 days. For an immediate re-check under warn or off, spawn that type in an Opus/Fable/Mythos main session without passing a model or using a fork.",
       "default": "warn"
     },
     "autoCompact": {

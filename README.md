@@ -119,7 +119,7 @@ This assumes:
 
 - **One session on the account.** Other sessions, other devices or claude.ai use move the same percentage, so the rate comes out too high and every share with it.
 - **List-price ratios match how the plan counts usage.** Anthropic does not publish how plan usage is computed; if the ratios differ, shares are off by the same factor.
-- **Cache writes are split by the one figure the mod gets.** For a subagent, the split between 5-minute and 1-hour writes comes from the Agent tool result, which reports the run's last request; the mod applies it to that whole run. Each run is priced at its own model when it ends, and a later run does not reprice an earlier one. A background subagent's writes, and the main loop's, are priced as 5-minute writes: the mod gets no split for them.
+- **Cache writes are split by the one figure the mod gets.** For a subagent, the split between 5-minute and 1-hour writes comes from the Agent tool result, which reports the run's last request; the mod applies it to that whole run. Each run is priced at its own model when it ends, and a later run does not reprice an earlier one. The main loop and subagent runs that report no split, including background runs and SendMessage continuations, are priced as 5-minute writes. The row omits the cache lifetime when its totals include writes with an unknown split.
 - **The percentage is coarse.** With a 2-point move, rounding alone can shift the rate by tens of percent.
 
 Treat the share as an order of magnitude: useful to see that one subagent cost ten times another, not to tell 0.8% from 1.1%.
@@ -154,7 +154,7 @@ A status-line tool draws in a terminal session. We have not checked whether the 
 
 ## What has been tested, and what has not
 
-As of v0.1.1. The unit and engine tests pass (50 tests, `claude plugin test`). Beyond those, the mod was run in throwaway sessions started with `--plugin-dir` (Claude Code 2.1.325, Haiku as the main model), with thresholds set for the test.
+In v0.1.2, all 64 unit and engine tests pass (`claude plugin test`). The live-session checks below used throwaway sessions started with `--plugin-dir` (Claude Code 2.1.325, Haiku as the main model), with thresholds set for the test.
 
 Run on v0.1.1:
 

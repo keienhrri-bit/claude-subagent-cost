@@ -85,6 +85,17 @@ describe('subagent rows', () => {
     expect(r.turns).toBe(2)
   })
 
+  test('a continuation without its own cache split uses the five-minute price', async () => {
+    const first = { ...applySplit(addRun(fresh, writes, 'claude-sonnet-5-5'), 1), cacheTtl: '1h' as const }
+    const continued = addRun(first, writes, 'claude-sonnet-5-5')
+
+    expect(first.weighted).toBe(4)
+    expect(continued.weightedBefore).toBe(4)
+    expect(continued.weighted).toBe(6.5)
+    expect(continued.usage.cacheWrite).toBe(2_000_000)
+    expect(continued.cacheTtl).toBeUndefined()
+  })
+
   test('a row an earlier version stored keeps its weight and adds the next run', async () => {
     const old: AgentRow = { ...fresh, usage: writes, weighted: 2.5, turns: 1, usageModel: 'claude-sonnet-5-5' }
     expect(addRun(old, writes, 'claude-haiku-5-5').weighted).toBe(2.625)

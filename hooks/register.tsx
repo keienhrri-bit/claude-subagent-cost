@@ -3,10 +3,13 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
 import type {
   AgentRow,
+  AgentToolRun,
   CompactState,
   ContextReading,
+  HandoffBatch,
   MainTally,
   PendingNote,
+  QuotaAlerts,
   WindowReading,
 } from '../types'
 import {
@@ -27,6 +30,7 @@ import {
   handoffNote,
   handoffToast,
   isExpensive,
+  isLiveAlertKey,
   langOf,
   liveWindows,
   mergeWindows,
@@ -34,16 +38,20 @@ import {
   pastHandoff,
   pastWarn,
   rearm,
+  rememberReset,
+  rememberResets,
   stepEstimate,
   tallyOf,
   totalTokens,
   warnToast,
   weigh,
+  windowKey,
 } from './logic'
-import type { CompactSettings, Lang, ModelPolicy, Thresholds } from './logic'
+import type { Alert, CompactSettings, Lang, ModelPolicy, Thresholds } from './logic'
 
 
 const agentsAtom = atom({ plugin: 'subagent-cost', key: 'agents' } as const, {} as Record<string, AgentRow>)
+const agentToolRunsAtom = atom({ plugin: 'subagent-cost', key: 'agentToolRuns' } as const, {} as Record<string, AgentToolRun>)
 const mainAtom = atom({ plugin: 'subagent-cost', key: 'main' } as const, {
   usage: EMPTY_TALLY,
   weighted: 0,
@@ -56,6 +64,7 @@ const rateAtom = atom({ plugin: 'subagent-cost', key: 'rate' } as const, null)
 const warnedAtom = atom({ plugin: 'subagent-cost', key: 'warned' } as const, [] as string[])
 const handedOffAtom = atom({ plugin: 'subagent-cost', key: 'handedOff' } as const, [] as string[])
 const pendingAtom = atom({ plugin: 'subagent-cost', key: 'pendingNote' } as const, null as PendingNote | null)
+const alertsAtom = atom({ plugin: 'subagent-cost', key: 'quotaAlerts' } as const, null as QuotaAlerts | null)
 const compactAtom = atom({ plugin: 'subagent-cost', key: 'compact' } as const, { isSuggested: false } as CompactState)
 
 const BUSY_STATUSES = new Set(['pending', 'running', 'waiting'])
@@ -76,8 +85,6 @@ let cfg: Config = configOf({})
 let isMainTurnRunning = false
 let askedByTool = false
 let lastStop: { at: number; inFlight: number } | null = null
-// Tool calls a subagent made in its current run, by agent id, until the run ends.
-const toolCalls = new Map<string, number>()
 
 /** How long what was seen of a subagent type stands before one spawn checks it again. */
 const RELEARN_MS = 7 * 24 * 3_600_000
@@ -150,21 +157,135 @@ async function totalWeighted($: EngineInterface): Promise<number> {
   return Object.values(agents).reduce((sum, a) => sum + a.weighted, main.weighted)
 }
 
-/** Appends a waiting handoff request to the conversation, between turns. */
-async function deliverByAppend($: EngineInterface): Promise<void> {
-  const pending = await read($, pendingAtom)
-  if (!pending) return
-  await update($, pendingAtom, () => null)
-  const res = await $.session.append({
-    message: { type: 'user', content: [{ type: 'text', text: pending.text }] },
+async function loadQuotaAlerts($: EngineInterface): Promise<QuotaAlerts> {
+  const current = await read($, alertsAtom)
+  if (current) return current
+
+  const [warned, handedOff, note] = await Promise.all([
+    read($, warnedAtom), read($, handedOffAtom), read($, pendingAtom),
+  ])
+  const waiting = note
+    ? { windows: note.windows ?? [], legacy: note.windows?.length ? undefined : note }
+    : null
+  // Older versions marked requests as handed off before sending them.
+  const waitingKeys = new Set(note?.key.split(' + '))
+  const initial = { warned, handedOff: handedOff.filter(key => !waitingKeys.has(key)), waiting, sending: null }
+  return (await update($, alertsAtom, state => state ?? initial)) ?? initial
+}
+
+function handoffKeys(batch: HandoffBatch | null): string[] {
+  if (!batch) return []
+  return [...(batch.legacy?.key.split(' + ') ?? []), ...batch.windows.map(windowKey)]
+}
+
+function mergeHandoffs(first: HandoffBatch | null, second: HandoffBatch | null): HandoffBatch | null {
+  if (!first || !second) return first ?? second
+  return { windows: mergeWindows(first.windows, second.windows), legacy: first.legacy ?? second.legacy }
+}
+
+function liveHandoff(
+  batch: HandoffBatch | null,
+  now: number,
+  readings: readonly WindowReading[] = [],
+): HandoffBatch | null {
+  if (!batch) return null
+  const dated = liveWindows(batch.windows.map(w => rememberReset(w, readings)), now)
+  const stillDue = new Set(rearm(dated.map(windowKey), readings, cfg.th))
+  const windows = dated.filter(w => stillDue.has(windowKey(w)))
+  const legacy = batch.legacy?.key.split(' + ').some(key => isLiveAlertKey(key, now)) ? batch.legacy : undefined
+  return windows.length > 0 || legacy ? { windows, legacy } : null
+}
+
+async function observeAlerts($: EngineInterface, windows: WindowReading[], now: number): Promise<Alert[]> {
+  const initial = await loadQuotaAlerts($)
+  let alerts: Alert[] = []
+  await update($, alertsAtom, current => {
+    const state = current ?? initial
+    const warned = rememberResets(rearm(state.warned, windows, cfg.th), windows)
+    const handedOff = rememberResets(rearm(state.handedOff, windows, cfg.th), windows)
+    const waiting = liveHandoff(state.waiting, now, windows)
+    const sending = state.sending && {
+      ...state.sending,
+      windows: state.sending.windows.map(w => rememberReset(w, windows)),
+    }
+    const reserved = rememberResets([...handoffKeys(waiting), ...handoffKeys(sending)], windows)
+    alerts = alertsFor(windows, cfg.th, warned, [...handedOff, ...reserved], now)
+    const due = alerts.filter(a => a.kind === 'handoff').map(a => a.window)
+    return {
+      warned: [...warned, ...alerts.filter(a => a.kind === 'warn').map(a => a.key)],
+      handedOff,
+      waiting: due.length > 0 ? mergeHandoffs(waiting, { windows: due }) : waiting,
+      sending,
+    }
   })
-  if (res.deny !== undefined) {
-    // Keep it for the next chance.
-    await update($, pendingAtom, () => pending)
-    dbg($, `handoff request refused by a plugin above: ${res.deny}`)
-    return
+  return alerts
+}
+
+/** Take the current batch atomically. A failed delivery joins the requests
+ * that came due while it was being sent. */
+async function deliverHandoff($: EngineInterface, send: (text: string) => boolean | Promise<boolean>): Promise<boolean> {
+  const state = await loadQuotaAlerts($)
+  if (!state.waiting || state.sending) return false
+
+  let cwd: string
+  try {
+    cwd = await $.session.cwd()
+  } catch (err) {
+    dbg($, `handoff working directory unavailable: ${err instanceof Error ? err.message : String(err)}`)
+    return false
   }
-  dbg($, `handoff request appended (${pending.key})`)
+  const now = await $.clock.now()
+  const claim: { batch: HandoffBatch | null } = { batch: null }
+  await update($, alertsAtom, current => {
+    // update can retry after another hook changes the state.
+    claim.batch = null
+    if (!current?.waiting || current.sending) return current
+    claim.batch = liveHandoff(current.waiting, now)
+    return { ...current, waiting: null, sending: claim.batch }
+  })
+  const batch = claim.batch
+  if (!batch) return false
+
+  let delivered = false
+  try {
+    const legacy = batch.legacy?.text
+    const text = batch.windows.length > 0
+      ? handoffNote(batch.windows, cfg.handoffPath, cwd, now, legacy)
+      : legacy
+    if (text) delivered = await send(text)
+  } catch (err) {
+    dbg($, `handoff delivery failed: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    await update($, alertsAtom, current => {
+      if (!current?.sending) return current
+      return {
+        ...current,
+        sending: null,
+        waiting: delivered ? current.waiting : mergeHandoffs(current.sending, current.waiting),
+        handedOff: delivered ? [...current.handedOff, ...handoffKeys(current.sending)] : current.handedOff,
+      }
+    })
+  }
+  return delivered
+}
+
+/** Appends waiting handoff requests to the conversation, between turns. */
+async function deliverByAppend($: EngineInterface): Promise<void> {
+  while (!isMainTurnRunning) {
+    const delivered = await deliverHandoff($, async text => {
+      if (isMainTurnRunning) return false
+      const res = await $.session.append({
+        message: { type: 'user', content: [{ type: 'text', text }] },
+      })
+      if (res.deny !== undefined) {
+        dbg($, `handoff request refused: ${res.deny}`)
+        return false
+      }
+      dbg($, 'handoff request appended')
+      return true
+    })
+    if (!delivered) return
+  }
 }
 
 async function isBusy($: EngineInterface): Promise<boolean> {
@@ -394,11 +515,18 @@ export const register: Register = (on, options) => {
 
   // ------------------------------------------------------------ main loop
 
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       isMainTurnRunning = true
       askedByTool = false
+      return next(e)
     }
+    const agentId = e.agentId
+    await update($, agentToolRunsAtom, runs => {
+      const active = runs[agentId]
+      const count = active?.turnId === undefined || active.turnId === e.turnId ? (active?.count ?? 0) : 0
+      return { ...runs, [agentId]: { turnId: e.turnId, count } }
+    })
     return next(e)
   })
 
@@ -406,7 +534,11 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) {
       // A background subagent's row gets no Agent result to read its tool
       // count from; count its calls here instead.
-      toolCalls.set(e.agentId, (toolCalls.get(e.agentId) ?? 0) + 1)
+      const agentId = e.agentId
+      await update($, agentToolRunsAtom, runs => ({
+        ...runs,
+        [agentId]: { ...runs[agentId], count: (runs[agentId]?.count ?? 0) + 1 },
+      }))
       return next(e)
     }
     const tool = String(e.tool)
@@ -418,13 +550,14 @@ export const register: Register = (on, options) => {
     const res = await next(e)
     // A handoff request reaches the model after this tool's result, the way
     // a PostToolUse hook's context does, so it lands mid-turn.
-    const pending = await read($, pendingAtom)
-    if (pending && res.deny === undefined) {
-      await update($, pendingAtom, () => null)
-      dbg($, `handoff request attached to the ${tool} result (${pending.key})`)
-      return { ...res, context: [...(res.context ?? []), pending.text] }
-    }
-    return res
+    if (res.deny !== undefined) return res
+    let context = res.context
+    await deliverHandoff($, text => {
+      context = [...(context ?? []), text]
+      dbg($, `handoff request attached to the ${tool} result`)
+      return true
+    })
+    return context === res.context ? res : { ...res, context }
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e, next) => {
@@ -440,8 +573,9 @@ export const register: Register = (on, options) => {
       // A subagent's loop ended a turn: its usage covers that whole run.
       const agentId = e.agentId
       const tally = tallyOf(e.usage)
-      const calls = toolCalls.get(agentId) ?? 0
-      toolCalls.delete(agentId)
+      const active = (await read($, agentToolRunsAtom))[agentId]
+      const finished = active?.turnId === undefined || active.turnId === e.turnId ? active : undefined
+      const calls = finished?.count ?? 0
       const agents = await read($, agentsAtom)
       let type = 'agent'
       if (!rowFor(agents, agentId)) {
@@ -468,12 +602,7 @@ export const register: Register = (on, options) => {
         const row = addRun(
           {
             ...base,
-            toolUses:
-              calls === 0
-                ? base.toolUses
-                : isContinued
-                  ? (base.toolUses ?? 0) + calls
-                  : (base.toolUses ?? calls),
+            toolUses: isContinued ? (base.toolUses ?? 0) + calls : (base.toolUses ?? calls),
             durationMs: isContinued
               ? (base.durationMs ?? 0) + e.durationMs
               : (base.durationMs ?? e.durationMs),
@@ -483,6 +612,15 @@ export const register: Register = (on, options) => {
         )
         return { ...current, [key]: row }
       })
+      if (finished) {
+        await update($, agentToolRunsAtom, runs => {
+          const active = runs[agentId]
+          if (!active || active.turnId !== finished.turnId || active.count !== finished.count) return runs
+          const remaining = { ...runs }
+          delete remaining[agentId]
+          return remaining
+        })
+      }
       dbg(
         $,
         `subagent ${agentId} turn ${e.reason}: ${JSON.stringify(tally)} on ${e.usage?.model ?? '?'}, ` +
@@ -521,11 +659,12 @@ export const register: Register = (on, options) => {
   // ------------------------------------------------------------ quota
 
   on('session.measure', async ($, e, next) => {
-    const windows: WindowReading[] = e.rateLimits.map(r => ({
+    const now = await $.clock.now()
+    const windows = liveWindows(e.rateLimits.map(r => ({
       kind: r.kind,
       percentUsed: r.percentUsed,
-      resetsAt: r.resetsAt,
-    }))
+      resetsAt: r.resetsAt?.trim() || undefined,
+    })), now)
     await update($, contextAtom, () => ({
       tokens: e.context.tokens,
       percent: e.context.percent,
@@ -549,39 +688,14 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // The alerts, one of each per window. A reading far under the thresholds
-    // means its window reset, which re-arms that kind.
-    const warned = await read($, warnedAtom)
-    const handedOff = await read($, handedOffAtom)
-    const warnedNow = rearm(warned, windows, cfg.th)
-    const handedOffNow = rearm(handedOff, windows, cfg.th)
-    if (warnedNow.length !== warned.length) await update($, warnedAtom, () => warnedNow)
-    if (handedOffNow.length !== handedOff.length) await update($, handedOffAtom, () => handedOffNow)
-
-    const alerts = alertsFor(windows, cfg.th, warnedNow, handedOffNow)
-    const due = alerts.filter(a => a.kind === 'handoff')
-    for (const alert of alerts) {
-      if (alert.kind !== 'warn') continue
-      await update($, warnedAtom, keys => [...keys, alert.key])
-      $.ui.toast(warnToast(alert.window, cfg.th, cfg.lang), { timeoutMs: 8000 })
-    }
-    if (due.length > 0) {
-      await update($, handedOffAtom, keys => [...keys, ...due.map(a => a.key)])
-      // One request for every window due, joined with any still waiting to go
-      // out. (A request an earlier version left waiting names no windows: the
-      // new one, which asks the same, takes its place.)
-      const waiting = await read($, pendingAtom)
-      const named = mergeWindows(waiting?.windows ?? [], due.map(a => a.window))
-      const key = [waiting?.key, ...due.map(a => a.key)].filter(k => k).join(' + ')
-      const text = handoffNote(named, cfg.handoffPath, await $.session.cwd(), await $.clock.now())
-      await update($, pendingAtom, () => ({ key, text, windows: named }))
-      for (const alert of due) {
+    for (const alert of await observeAlerts($, windows, now)) {
+      if (alert.kind === 'warn') {
+        $.ui.toast(warnToast(alert.window, cfg.th, cfg.lang), { timeoutMs: 8000 })
+      } else {
         $.ui.toast(handoffToast(alert.window, cfg.handoffPath, cfg.lang), { timeoutMs: 10000 })
       }
-      // Between turns the note can go in at once; during a turn it rides the
-      // next tool result, or the turn's end.
-      if (!isMainTurnRunning) await deliverByAppend($)
     }
+    if (!isMainTurnRunning) await deliverByAppend($)
 
     return next(e)
   })
@@ -606,13 +720,14 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+    const engine = await next(e)
+    if (e.props.hasSurvey) return engine
     const now = await $.clock.now()
     const windows = liveWindows(await read($, windowsAtom), now)
     const agents = Object.values(await read($, agentsAtom))
     const main = await read($, mainAtom)
     const compact = await read($, compactAtom)
-    if (windows.length === 0 && agents.length === 0 && main.turns === 0) return next(e)
+    if (windows.length === 0 && agents.length === 0 && main.turns === 0) return engine
 
     const line = bandLine({
       windows,
@@ -624,17 +739,20 @@ export const register: Register = (on, options) => {
     const isWarn = pastWarn(windows, cfg.th)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
-      <Box flexDirection="row">
-        <Text color={isWarn ? 'warning' : undefined} dimColor={!isWarn} wrap="truncate-end">
-          {(isWarn ? '⚠ ' : '') + line}
-        </Text>
-        {compact.isSuggested ? (
-          <Button
-            key="compact"
-            label={cfg.lang === 'zh' ? '压缩上下文' : 'Compact context'}
-            onPress={() => compactFromButton($)}
-          />
-        ) : null}
+      <Box flexDirection="column">
+        {engine}
+        <Box flexDirection="row">
+          <Text color={isWarn ? 'warning' : undefined} dimColor={!isWarn} wrap="truncate-end">
+            {(isWarn ? '⚠ ' : '') + line}
+          </Text>
+          {compact.isSuggested ? (
+            <Button
+              key="compact"
+              label={cfg.lang === 'zh' ? '压缩上下文' : 'Compact context'}
+              onPress={() => compactFromButton($)}
+            />
+          ) : null}
+        </Box>
       </Box>
     )
   })
