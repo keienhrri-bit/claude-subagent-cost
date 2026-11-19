@@ -498,6 +498,35 @@ async function compactFromButton($: EngineInterface): Promise<void> {
   $.ui.toast(holdToast(hold, cfg.lang), { timeoutMs: 8000 })
 }
 
+/** Takes the tool calls counted for one run of a subagent and forgets them:
+ * the current run's, or one that a later run started before it was settled. */
+async function settleToolRun($: EngineInterface, agentId: string, turnId: string): Promise<number> {
+  let calls = 0
+  await update($, agentToolRunsAtom, runs => {
+    calls = 0
+    const active = runs[agentId]
+    if (!active) return runs
+    const earlier = { ...active.earlier }
+    let rest: AgentToolRun | undefined
+    if (active.turnId === undefined || active.turnId === turnId) {
+      calls = active.count
+      if (Object.keys(earlier).length > 0) rest = { count: 0, earlier }
+    } else {
+      const count = earlier[turnId]
+      if (count === undefined) return runs
+      calls = count
+      delete earlier[turnId]
+      rest = { turnId: active.turnId, count: active.count }
+      if (Object.keys(earlier).length > 0) rest.earlier = earlier
+    }
+    const out = { ...runs }
+    if (rest) out[agentId] = rest
+    else delete out[agentId]
+    return out
+  })
+  return calls
+}
+
 export const register: Register = (on, options) => {
   cfg = configOf(options)
 
@@ -641,8 +670,12 @@ export const register: Register = (on, options) => {
     const agentId = e.agentId
     await update($, agentToolRunsAtom, runs => {
       const active = runs[agentId]
-      const count = active?.turnId === undefined || active.turnId === e.turnId ? (active?.count ?? 0) : 0
-      return { ...runs, [agentId]: { turnId: e.turnId, count } }
+      if (!active || active.turnId === undefined || active.turnId === e.turnId) {
+        return { ...runs, [agentId]: { ...active, turnId: e.turnId, count: active?.count ?? 0 } }
+      }
+      // The run before has not been settled yet: its count waits under its id.
+      const earlier = { ...active.earlier, [active.turnId]: active.count }
+      return { ...runs, [agentId]: { turnId: e.turnId, count: 0, earlier } }
     })
     return next(e)
   })
@@ -690,9 +723,7 @@ export const register: Register = (on, options) => {
       // A subagent's loop ended a turn: its usage covers that whole run.
       const agentId = e.agentId
       const tally = tallyOf(e.usage)
-      const active = (await read($, agentToolRunsAtom))[agentId]
-      const finished = active?.turnId === undefined || active.turnId === e.turnId ? active : undefined
-      const calls = finished?.count ?? 0
+      const calls = await settleToolRun($, agentId, e.turnId)
       const agents = await read($, agentsAtom)
       let type = 'agent'
       if (!rowFor(agents, agentId)) {
@@ -729,15 +760,6 @@ export const register: Register = (on, options) => {
         )
         return { ...current, [key]: row }
       })
-      if (finished) {
-        await update($, agentToolRunsAtom, runs => {
-          const active = runs[agentId]
-          if (!active || active.turnId !== finished.turnId || active.count !== finished.count) return runs
-          const remaining = { ...runs }
-          delete remaining[agentId]
-          return remaining
-        })
-      }
       dbg(
         $,
         `subagent ${agentId} turn ${e.reason}: ${JSON.stringify(tally)} on ${e.usage?.model ?? '?'}, ` +

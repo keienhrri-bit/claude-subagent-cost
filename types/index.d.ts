@@ -47,10 +47,14 @@ export type AgentRow = {
   durationMs?: number
 }
 
-/** Tool calls in the current run, held by the session across mod reloads. */
+/** Tool calls in a subagent's runs not yet settled, held by the session
+ * across mod reloads. */
 export type AgentToolRun = {
+  /** The run the agent's tool calls count toward: the one started last. */
   turnId?: string
   count: number
+  /** Earlier runs whose end is still being settled, by turn id. */
+  earlier?: Record<string, number>
 }
 
 export type MainTally = {

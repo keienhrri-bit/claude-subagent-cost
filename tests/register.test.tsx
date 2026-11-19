@@ -19,6 +19,10 @@ type World = {
   agents: AgentInfo[]
   toolUseIds: string[]
   cwd: () => EventResult<'session.cwd'> | Promise<EventResult<'session.cwd'>>
+  /** What the engine does before it answers a turn's end. */
+  completing: (turnId: string) => void | Promise<void>
+  /** The last value the mod wrote for `agentToolRuns`. */
+  toolRuns: unknown
   /** What `$.store` holds across sessions. */
   store: Map<string, unknown>
   /** Agent types whose definition names a model of its own. */
@@ -39,6 +43,8 @@ function world(on: On): World {
     agents: [],
     toolUseIds: [],
     cwd: () => ({ value: '/work/demo' }),
+    completing: () => undefined,
+    toolRuns: undefined,
     store: new Map<string, unknown>(),
     ownModels: { Explore: 'claude-haiku-5-5' },
     rows: [],
@@ -63,7 +69,14 @@ function world(on: On): World {
   on('agent.list', () => ({ value: w.agents }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
-  on('turn.complete', () => ({ text: '' }))
+  on('turn.complete', async (_$, e) => {
+    await w.completing(e.turnId)
+    return { text: '' }
+  })
+  on('state.set', { plugin: PLUGIN, key: 'agentToolRuns' }, (_$, e, next) => {
+    w.toolRuns = e.value
+    return next(e)
+  })
   on('classic.Stop', () => ({}))
   on('session.compact', (_$, e) => {
     w.compactions.push(e.instructions ?? '')
@@ -857,7 +870,7 @@ test('a background subagent can complete with zero tools', async ($, on) => {
 })
 
 test('a background run restores and clears its unsettled tool count from session state', async ($, on) => {
-  world(on)
+  const w = world(on)
   const agentId = 'agent-spawn-restored'
   on('state.get', { plugin: PLUGIN, key: 'agentToolRuns' }, async (_$, e, next) => {
     const stored = await next(e)
@@ -891,6 +904,7 @@ test('a background run restores and clears its unsettled tool count from session
   })
   await $.tool.call({ tool: 'Bash', command: 'ls', agentId })
   await finish('bg-before-reload')
+  expect(w.toolRuns).toEqual({})
   const ui = await $.ui.mount({
     plugin: PLUGIN,
     surface: 'terminal',
@@ -905,6 +919,68 @@ test('a background run restores and clears its unsettled tool count from session
   await $.tool.call({ tool: 'Bash', command: 'pwd', agentId })
   await finish('bg-next-run')
   expect((await line())?.text).toContain('4 tools')
+  await ui.unmount()
+})
+
+test('a new run of a subagent does not take the tool count of one still settling', async ($, on) => {
+  let enter!: () => void
+  let release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  const released = new Promise<void>(resolve => { release = resolve })
+  const w = world(on)
+  // What sits beneath the mod takes its time over the first run's end.
+  w.completing = async turnId => {
+    if (turnId !== 'bg-a') return
+    enter()
+    await released
+  }
+  const agentId = 'agent-spawn-bg'
+  await $.agent.spawn({
+    tool_use_id: 'spawn-bg',
+    prompt: 'watch the build',
+    description: 'watch build',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: true,
+    fork: false,
+  })
+  const finish = (turnId: string) => $.turn.complete({
+    answer: 'checked',
+    durationMs: 1_000,
+    isAborted: false,
+    turnId,
+    agentId,
+    reason: 'answer',
+    usage: { model: 'claude-haiku-5-5', input_tokens: 20, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+  })
+
+  await $.turn.start({ text: 'watch', turnId: 'bg-a', agentId })
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId })
+  await $.tool.call({ tool: 'Bash', command: 'pwd', agentId })
+  const settling = finish('bg-a')
+  await Promise.race([entered, settling])
+  try {
+    // Continued with SendMessage while the first run is still settling.
+    await $.turn.start({ text: 'again', turnId: 'bg-b', agentId })
+    await $.tool.call({ tool: 'Bash', command: 'ls', agentId })
+  } finally {
+    release()
+  }
+  await settling
+
+  const ui = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'spawn-bg',
+    props: toolUseProps('spawn-bg'),
+  })
+  const line = () => ui.find({ type: 'Text', text: /subagent Explore/ })
+  expect((await line())?.text).toContain('2 tools')
+  await finish('bg-b')
+  expect((await line())?.text).toContain('3 tools')
+  expect(w.toolRuns).toEqual({})
   await ui.unmount()
 })
 
