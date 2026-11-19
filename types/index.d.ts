@@ -93,11 +93,18 @@ export type HandoffBatch = {
   legacy?: PendingNote
 }
 
+/** A batch taken for sending. */
+export type HandoffClaim = HandoffBatch & {
+  /** Names the request in its text, so a load of the mod that finds the claim
+   * unsettled can look for it in the conversation. Absent on a claim 0.1.2 kept. */
+  id?: string
+}
+
 export type QuotaAlerts = {
   warned: string[]
   handedOff: string[]
   waiting: HandoffBatch | null
-  sending: HandoffBatch | null
+  sending: HandoffClaim | null
 }
 
 export type ContextReading = {

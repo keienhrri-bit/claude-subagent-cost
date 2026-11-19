@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { AgentInfo, EventResult, On, SessionContextUsage, SessionRateLimit } from 'claude-code'
+import type { AgentInfo, EventResult, On, SessionContextUsage, SessionMessage, SessionRateLimit } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
+
+import type { QuotaAlerts } from '../types'
 
 // Everything here is made up: no real session, account or path.
 
@@ -21,6 +23,8 @@ type World = {
   store: Map<string, unknown>
   /** Agent types whose definition names a model of its own. */
   ownModels: Record<string, string>
+  /** The main conversation as `$.session.messages()` reads it. */
+  rows: SessionMessage[]
   clock: ReturnType<typeof mock.clock>
   session: ReturnType<typeof mock.session>
 }
@@ -37,9 +41,11 @@ function world(on: On): World {
     cwd: () => ({ value: '/work/demo' }),
     store: new Map<string, unknown>(),
     ownModels: { Explore: 'claude-haiku-5-5' },
+    rows: [],
     clock: mock.clock(on, { now: NOW }),
     session: mock.session(on),
   }
+  on('session.messages', () => ({ value: w.rows }))
   on('ui.toast', (_$, e) => {
     w.toasts.push(e.text)
     return { value: undefined }
@@ -603,6 +609,54 @@ test('a legacy pending handoff keeps its text when another window comes due', as
   expect(text).toContain(legacy.text)
   expect(text.match(/5-hour usage window/g)?.length).toBe(1)
   expect(text).toContain('7-day usage window is at 92%')
+})
+
+/** What the session held for `quotaAlerts` before this load of the mod. */
+function seedAlerts(on: On, alerts: QuotaAlerts) {
+  on('state.get', { plugin: PLUGIN, key: 'quotaAlerts' }, async (_$, e, next) => {
+    const stored = await next(e)
+    return stored.value?.version === 0 ? { value: { version: 0, value: alerts } } : stored
+  })
+}
+
+test('a handoff request a reload cut short is sent again, with a window that came due since', async ($, on) => {
+  const w = world(on)
+  // An earlier load claimed the request and went away before settling it.
+  seedAlerts(on, { warned: [], handedOff: [], waiting: null, sending: { id: 'cut00001', windows: [limits(91)[0]!] } })
+  await measure($, 91, 92)
+  const rows = w.session.appended()
+  expect(rows.length).toBe(1)
+  const text = JSON.stringify(rows[0]?.message.content)
+  expect(text).toContain('5-hour usage window is at 91%')
+  expect(text).toContain('7-day usage window is at 92%')
+  // The request names itself, so a later load can tell whether it went out.
+  expect(text).toMatch(/\[subagent-cost [0-9a-f]{8}\]/)
+
+  await measure($, 91, 92)
+  expect(w.session.appended().length).toBe(1)
+})
+
+test('a claim 0.1.2 left unsettled goes out when the next turn ends', async ($, on) => {
+  const w = world(on)
+  seedAlerts(on, { warned: [], handedOff: [], waiting: null, sending: { windows: [limits(91)[0]!] } })
+  await mainTurn($, 't1', 'Done.')
+  expect(w.session.appended().length).toBe(1)
+  expect(JSON.stringify(w.session.appended()[0]?.message.content)).toContain('5-hour usage window is at 91%')
+})
+
+test('a cut-short request the conversation shows went out is settled, not sent again', async ($, on) => {
+  const w = world(on)
+  w.rows = [{ role: 'user', text: '[subagent-cost cut00002] The 5-hour usage window is at 91% (resets in 2h).', toolUses: [] }]
+  seedAlerts(on, { warned: [], handedOff: [], waiting: null, sending: { id: 'cut00002', windows: [limits(91)[0]!] } })
+  await measure($, 91, 92)
+  const rows = w.session.appended()
+  expect(rows.length).toBe(1)
+  const text = JSON.stringify(rows[0]?.message.content)
+  expect(text).toContain('7-day usage window is at 92%')
+  expect(text).not.toContain('5-hour usage window')
+
+  await measure($, 93, 93)
+  expect(w.session.appended().length).toBe(1)
 })
 
 test('an empty reading clears the quota figures and holds nothing off', async ($, on) => {

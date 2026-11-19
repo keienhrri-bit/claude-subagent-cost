@@ -591,6 +591,12 @@ export function handoffToast(w: WindowReading, path: string, lang: Lang): string
     : `${label} quota at ${fmtPercent(w.percentUsed)}: Claude has been asked to write a handoff brief to ${path} and start no new large task.`
 }
 
+/** The tag a handoff request opens with; with the request's id, it is how a
+ * later load of the mod finds out whether a request it never settled went out. */
+export function requestTag(id?: string): string {
+  return id ? `[subagent-cost ${id}]` : '[subagent-cost]'
+}
+
 /** The note appended to the conversation when windows reach handoffAt: one
  * note for every window due. Written in English for the model either way; the
  * brief follows the conversation's language. */
@@ -600,6 +606,7 @@ export function handoffNote(
   cwd: string,
   now: number,
   legacyText?: string,
+  id?: string,
 ): string {
   const states = windows.map(w => {
     const label = w.kind === FIVE_HOUR ? '5-hour' : '7-day'
@@ -607,7 +614,7 @@ export function handoffNote(
     return `the ${label} usage window is at ${fmtPercent(w.percentUsed)}${reset ? ` (${reset})` : ''}`
   })
   const said = states.join(', and ')
-  const header = `[subagent-cost] ${said.charAt(0).toUpperCase()}${said.slice(1)}.`
+  const header = `${requestTag(id)} ${said.charAt(0).toUpperCase()}${said.slice(1)}.`
   if (legacyText) return legacyText + '\n\n' + header
   return [
     header,

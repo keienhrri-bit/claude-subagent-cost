@@ -7,6 +7,7 @@ import type {
   CompactState,
   ContextReading,
   HandoffBatch,
+  HandoffClaim,
   MainTally,
   PendingNote,
   QuotaAlerts,
@@ -40,6 +41,7 @@ import {
   rearm,
   rememberReset,
   rememberResets,
+  requestTag,
   stepEstimate,
   tallyOf,
   totalTokens,
@@ -85,6 +87,11 @@ let cfg: Config = configOf({})
 let isMainTurnRunning = false
 let askedByTool = false
 let lastStop: { at: number; inFlight: number } | null = null
+
+/** The ids of the handoff claims this load of the mod is sending. A claim in
+ * the session's state that is not here was cut short: the mod reloaded or the
+ * session restarted mid-send, or the send could not be settled. */
+const ownClaims = new Set<string>()
 
 /** How long what was seen of a subagent type stands before one spawn checks it again. */
 const RELEARN_MS = 7 * 24 * 3_600_000
@@ -183,6 +190,18 @@ function mergeHandoffs(first: HandoffBatch | null, second: HandoffBatch | null):
   return { windows: mergeWindows(first.windows, second.windows), legacy: first.legacy ?? second.legacy }
 }
 
+/** A claim's windows and text, without its id: what goes back in the queue. */
+function batchOf(claim: HandoffClaim): HandoffBatch {
+  return claim.legacy ? { windows: claim.windows, legacy: claim.legacy } : { windows: claim.windows }
+}
+
+/** The request's text, opened by its tag. */
+function requestText(batch: HandoffBatch, id: string, cwd: string, now: number): string | undefined {
+  const legacy = batch.legacy?.text
+  if (batch.windows.length > 0) return handoffNote(batch.windows, cfg.handoffPath, cwd, now, legacy, id)
+  return legacy ? `${legacy}\n\n${requestTag(id)}` : undefined
+}
+
 function liveHandoff(
   batch: HandoffBatch | null,
   now: number,
@@ -221,9 +240,47 @@ async function observeAlerts($: EngineInterface, windows: WindowReading[], now: 
   return alerts
 }
 
+/** Whether a user row of the main conversation holds `tag`. */
+async function isInConversation($: EngineInterface, tag: string): Promise<boolean> {
+  try {
+    const rows = await $.session.messages()
+    return rows.some(row => row.role === 'user' && row.text.includes(tag))
+  } catch (err) {
+    dbg($, `conversation unavailable: ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
+}
+
+/** Settles a claim that no send of this load holds. A request the conversation
+ * holds went out and counts as handed off; any other goes back in the queue.
+ * A request attached to a tool result is settled before the result is
+ * returned, so an unsettled one never reached the conversation. */
+async function recoverClaim($: EngineInterface): Promise<void> {
+  const held = (await loadQuotaAlerts($)).sending
+  if (!held || (held.id !== undefined && ownClaims.has(held.id))) return
+  const wentOut = held.id !== undefined && (await isInConversation($, requestTag(held.id)))
+  let isSettled = false
+  await update($, alertsAtom, current => {
+    isSettled = false
+    const claim = current?.sending
+    if (!current || !claim || claim.id !== held.id) return current
+    isSettled = true
+    return {
+      ...current,
+      sending: null,
+      waiting: wentOut ? current.waiting : mergeHandoffs(batchOf(claim), current.waiting),
+      handedOff: wentOut ? [...current.handedOff, ...handoffKeys(claim)] : current.handedOff,
+    }
+  })
+  if (isSettled) {
+    dbg($, `unsettled handoff request ${held.id ?? '(0.1.2)'}: ${wentOut ? 'it went out' : 'queued again'}`)
+  }
+}
+
 /** Take the current batch atomically. A failed delivery joins the requests
  * that came due while it was being sent. */
 async function deliverHandoff($: EngineInterface, send: (text: string) => boolean | Promise<boolean>): Promise<boolean> {
+  await recoverClaim($)
   const state = await loadQuotaAlerts($)
   if (!state.waiting || state.sending) return false
 
@@ -235,36 +292,49 @@ async function deliverHandoff($: EngineInterface, send: (text: string) => boolea
     return false
   }
   const now = await $.clock.now()
-  const claim: { batch: HandoffBatch | null } = { batch: null }
-  await update($, alertsAtom, current => {
-    // update can retry after another hook changes the state.
-    claim.batch = null
-    if (!current?.waiting || current.sending) return current
-    claim.batch = liveHandoff(current.waiting, now)
-    return { ...current, waiting: null, sending: claim.batch }
-  })
+  const id = crypto.randomUUID().slice(0, 8)
+  // Held before the claim is written, so no other hook of this load takes it
+  // for a cut-short one.
+  ownClaims.add(id)
+  const claim: { batch: HandoffClaim | null } = { batch: null }
+  try {
+    await update($, alertsAtom, current => {
+      // update can retry after another hook changes the state.
+      claim.batch = null
+      if (!current?.waiting || current.sending) return current
+      const batch = liveHandoff(current.waiting, now)
+      claim.batch = batch && { ...batch, id }
+      return { ...current, waiting: null, sending: claim.batch }
+    })
+  } finally {
+    if (!claim.batch) ownClaims.delete(id)
+  }
   const batch = claim.batch
   if (!batch) return false
 
   let delivered = false
   try {
-    const legacy = batch.legacy?.text
-    const text = batch.windows.length > 0
-      ? handoffNote(batch.windows, cfg.handoffPath, cwd, now, legacy)
-      : legacy
+    const text = requestText(batch, id, cwd, now)
     if (text) delivered = await send(text)
   } catch (err) {
     dbg($, `handoff delivery failed: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
-    await update($, alertsAtom, current => {
-      if (!current?.sending) return current
-      return {
-        ...current,
-        sending: null,
-        waiting: delivered ? current.waiting : mergeHandoffs(current.sending, current.waiting),
-        handedOff: delivered ? [...current.handedOff, ...handoffKeys(current.sending)] : current.handedOff,
-      }
-    })
+    try {
+      await update($, alertsAtom, current => {
+        // This claim only: a later load may have settled it already.
+        const sent = current?.sending
+        if (!current || sent?.id !== id) return current
+        return {
+          ...current,
+          sending: null,
+          waiting: delivered ? current.waiting : mergeHandoffs(batchOf(sent), current.waiting),
+          handedOff: delivered ? [...current.handedOff, ...handoffKeys(sent)] : current.handedOff,
+        }
+      })
+    } finally {
+      // Unsettled after this, the claim is recovered as a cut-short one.
+      ownClaims.delete(id)
+    }
   }
   return delivered
 }
