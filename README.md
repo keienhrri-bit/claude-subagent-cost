@@ -66,16 +66,18 @@ It does not compact when:
 
 In a session that the desktop app or the Agent SDK runs, Claude Code does not yet let a mod compact between turns; there the mod queues a `/compact` with the same instructions instead, which runs as a turn of its own.
 
-`autoCompact: ask` shows a **Compact context** button on the quota line instead. `off` turns this off. If another mod or setting of yours also compacts automatically, turn one of them off.
+`autoCompact: ask` shows a **Compact context** button on the quota line instead. The button is withdrawn once usage passes the handoff threshold, and pressing it first checks again that usage is under the threshold and that no turn, agent or background task is running; if not, a toast says why. `off` turns this off. If another mod or setting of yours also compacts automatically, turn one of them off.
 
 ### Quota warnings and the handoff brief
 
 - At **88%** of the 5-hour window, the quota line turns into a warning and you get one toast.
 - At **90%**, Claude is asked to write a handoff brief to `HANDOFF.md` (relative to the session's folder) with these sections: Goal, Decisions made, Done, In progress, Next steps, Key files, Open questions, and to start no new large task in this window.
 
-Each fires once per window. The 7-day window has its own thresholds (also 88 / 90 by default); when both windows are due at once, or one comes due before the other's request has gone out, Claude gets one request that names both. A window is told from the next by its reset time; where Claude Code reports none, by its percentage falling under half the warning threshold. Below the thresholds the warnings add nothing to the conversation and spend no tokens.
+Each fires once per window. The 7-day window has its own thresholds (also 88 / 90 by default); when both windows are due at once, or one comes due before the other's request has gone out, Claude gets one request that names both. A window is told from the next by its reset time. Where Claude Code reports none, the mod notes when the reading came, and counts the window as over once its percentage falls under half the warning threshold, once a later reading's reset time puts the start of its window after that moment, or once a whole window's length has passed. Below the thresholds the warnings add nothing to the conversation and spend no tokens.
 
 How the request reaches Claude: during a turn, it is attached to the next tool result; between turns, it is added to the conversation as a message. In our test, a request added between turns was acted on with your next message, not before it.
+
+Each request opens with a short id (`[subagent-cost 1a2b3c4d]`). If the mod reloads or the session restarts while a request is being sent, the next attempt looks for that id in the conversation: found, the request counts as delivered; not found, it is sent again, together with any window that came due meanwhile. A request that was compacted away before that check is sent a second time.
 
 ### Subagent model policy
 
@@ -129,6 +131,7 @@ Treat the share as an order of magnitude: useful to see that one subagent cost t
 - Per session (Claude Code's plugin state): the rows, the token totals, the latest usage readings, the estimate's baseline and rate, which warnings have fired.
 - Across sessions (the plugin's own store): for each subagent type, whether it was seen inheriting the main model, and when (`inherits:<type>`).
 - It reads only what Claude Code passes to mods, and makes no network requests of its own. It reads no credentials.
+- It reads the conversation in one case only: when a handoff request was cut short mid-send, it looks for that request's id among the user-side messages, to tell whether it went out.
 - The only file it writes is its own store, through Claude Code's `$.store`. The handoff brief is written by Claude, not by the mod.
 - It changes the conversation in two ways only: the compaction, and the handoff request it adds.
 
@@ -154,7 +157,7 @@ A status-line tool draws in a terminal session. We have not checked whether the 
 
 ## What has been tested, and what has not
 
-In v0.1.2, all 64 unit and engine tests pass (`claude plugin test`). The live-session checks below used throwaway sessions started with `--plugin-dir` (Claude Code 2.1.325, Haiku as the main model), with thresholds set for the test.
+In v0.1.3, all 76 unit and engine tests pass (`claude plugin test`). The live-session checks below used throwaway sessions started with `--plugin-dir` (Claude Code 2.1.325, Haiku as the main model), with thresholds set for the test.
 
 Run on v0.1.1:
 
@@ -177,6 +180,7 @@ Not tested:
 - **Compaction between turns in an interactive terminal session** (the direct path, not the queued `/compact`).
 - **The estimate.** Its error is unknown (see above). In one test session the 5-hour percentage moved 2 points and a rate appeared, but other sessions were using the same account at the time, so that rate was too high.
 - **A subagent continued with SendMessage, and the 7-day re-check of a subagent type:** unit tests only.
+- **A reload or restart while a handoff request is being sent:** engine tests with stored session state only; no live session was cut short.
 - **The question heuristic** can miss a question that does not end in a question mark, and can treat a rhetorical last line as a question.
 
 ## Related

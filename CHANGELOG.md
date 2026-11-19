@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3 (2026-11-19)
+
+- Handoff: a request cut short by a mod reload or session restart no longer blocks every later handoff in the session. Each request now opens with a short id. The next delivery looks for that id in the conversation: a request found there counts as delivered, any other is sent again with the windows that came due meanwhile. A claim left by 0.1.2 is sent again.
+- Compaction: in `ask` mode the **Compact context** button is withdrawn once usage passes the handoff threshold. Pressing it checks again for the threshold, a turn in progress and running agents or background tasks, and a toast says why when it does not compact.
+- Alerts without a reset time: the mod records when such a reading came. Its record ends when a window's length has passed or a later reading's reset time puts its window's start after that moment, so a following window alerts again. A window that resets while its request is being sent is not confirmed or queued again afterwards. A request that 0.1.0 left pending for such a window is dropped by a low reading.
+- Background subagents: when a run starts before the previous run of the same agent has been settled, the previous run keeps its tool count.
+
+Known: a request compacted away before the check above is sent a second time. Tested with 76 unit and engine tests; the interrupted send and the button were not tried in a live session.
+
 ## 0.1.2 (2026-11-19)
 
 - Keep downstream `AbovePrompt` content visible when drawing the quota bar.

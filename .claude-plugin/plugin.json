@@ -1,6 +1,6 @@
 {
   "name": "subagent-cost",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Shows what each subagent cost and how much of your 5-hour and 7-day quota is used, compacts after a finished task, and asks Claude for a handoff brief before the quota runs out.",
   "author": { "name": "keienhrri-bit" },
   "license": "MIT",
