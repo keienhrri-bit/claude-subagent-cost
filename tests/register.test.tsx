@@ -751,6 +751,8 @@ test('a handoff request a reload cut short is sent again, with a window that cam
 
 test('a claim 0.1.2 left unsettled goes out when the next turn ends', async ($, on) => {
   const w = world(on)
+  // An earlier request of 0.1.2 carries the same bare tag; it says nothing of this claim.
+  w.rows = [{ role: 'user', text: '[subagent-cost] The 7-day usage window is at 90% (resets in 3d).', toolUses: [] }]
   seedAlerts(on, { warned: [], handedOff: [], waiting: null, sending: { windows: [limits(91)[0]!] } })
   await mainTurn($, 't1', 'Done.')
   expect(w.session.appended().length).toBe(1)
