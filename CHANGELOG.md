@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.2 (2026-11-18)
+## 0.1.2 (2026-11-19)
 
 - Keep downstream `AbovePrompt` content visible when drawing the quota bar.
 - Deduplicate quota alerts when reset times are blank or temporarily missing. A low reading preserves records with a known reset time. Expired readings are skipped for alerts, handoff requests, and the estimate.
