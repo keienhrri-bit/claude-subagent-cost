@@ -964,6 +964,52 @@ test('ask mode offers a button on the band instead', { options: { autoCompact: '
   }
 })
 
+/** ask mode, a large context and an answered turn: the band offers the button. */
+async function offerCompaction($: Engine, w: World) {
+  w.context = BIG
+  await measure($, 30)
+  await mainTurn($, 't1', 'Done.')
+  await w.clock.advance(2_000)
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+  expect(await ui.find({ key: 'compact' })).toBeDefined()
+  return ui
+}
+
+test('the compact button is withdrawn at the handoff threshold', { options: { autoCompact: 'ask' } }, async ($, on) => {
+  const w = world(on)
+  const ui = await offerCompaction($, w)
+  await measure($, 92)
+  expect(await ui.find({ key: 'compact' })).toBeUndefined()
+  await ui.press({ key: 'compact' }).catch(() => undefined)
+  expect(w.compactions.length).toBe(0)
+
+  // The next window does not bring the old offer back.
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 3, resetsAt: '2026-01-01T20:00:00.000Z' }])
+  expect(await ui.find({ key: 'compact' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('pressing the compact button checks again for a running turn and background work', { options: { autoCompact: 'ask' } }, async ($, on) => {
+  const w = world(on)
+  const ui = await offerCompaction($, w)
+
+  w.agents = [{ id: 'bg-1', description: 'watch tests', type: 'general-purpose', status: 'running' }]
+  await ui.press({ key: 'compact' })
+  expect(w.compactions.length).toBe(0)
+  expect(w.toasts.at(-1)).toContain('running')
+  w.agents = []
+
+  await $.turn.start({ text: 'go', turnId: 't2' })
+  await ui.press({ key: 'compact' })
+  expect(w.compactions.length).toBe(0)
+  await $.turn.complete({ answer: 'Which one?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+
+  // Still offered; nothing holds it off now.
+  await ui.press({ key: 'compact' })
+  expect(w.compactions.length).toBe(1)
+  await ui.unmount()
+})
+
 test('off mode never compacts', { options: { autoCompact: 'off' } }, async ($, on) => {
   const w = world(on)
   w.context = BIG

@@ -446,9 +446,43 @@ async function maybeCompact($: EngineInterface, turnAtSchedule: number): Promise
   await runCompact($, main.turns)
 }
 
+type CompactHold = 'turn' | 'quota' | 'busy'
+
+/** What keeps a compaction from running now, checked when the button is pressed. */
+async function compactHold($: EngineInterface): Promise<CompactHold | undefined> {
+  if (isMainTurnRunning) return 'turn'
+  if (pastHandoff(liveWindows(await read($, windowsAtom), await $.clock.now()), cfg.th)) return 'quota'
+  if (await isBusy($)) return 'busy'
+  return undefined
+}
+
+function holdToast(hold: CompactHold, lang: Lang): string {
+  const zh = lang === 'zh'
+  if (hold === 'quota') {
+    return zh
+      ? '额度已过交接线，不压缩：先写交接任务书，压缩也要花额度。'
+      : 'Not compacting: the quota is past the handoff threshold, so the brief comes first, and compacting spends quota too.'
+  }
+  if (hold === 'busy') {
+    return zh
+      ? '还有子代理或后台任务在跑，先不压缩；跑完再按。'
+      : 'Not compacting yet: an agent or background task is still running. Press again once it is done.'
+  }
+  return zh ? 'Claude 这一轮还没结束，先不压缩；结束后再按。' : 'Not compacting yet: Claude is still in a turn. Press again once it ends.'
+}
+
+/** The band's button, pressed: the offer may be stale by now. */
 async function compactFromButton($: EngineInterface): Promise<void> {
-  await update($, compactAtom, s => ({ ...s, isSuggested: false }))
-  await runCompact($, (await read($, mainAtom)).turns)
+  const hold = await compactHold($)
+  if (hold === undefined) {
+    await update($, compactAtom, s => ({ ...s, isSuggested: false }))
+    await runCompact($, (await read($, mainAtom)).turns)
+    return
+  }
+  // Past the handoff threshold the offer is withdrawn; otherwise it stands.
+  if (hold === 'quota') await update($, compactAtom, s => ({ ...s, isSuggested: false }))
+  dbg($, `compaction held off at the button: ${hold}`)
+  $.ui.toast(holdToast(hold, cfg.lang), { timeoutMs: 8000 })
 }
 
 export const register: Register = (on, options) => {
@@ -758,6 +792,11 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // A compaction offered earlier is withdrawn at the handoff threshold.
+    if (pastHandoff(windows, cfg.th) && (await read($, compactAtom)).isSuggested) {
+      await update($, compactAtom, s => ({ ...s, isSuggested: false }))
+    }
+
     for (const alert of await observeAlerts($, windows, now)) {
       if (alert.kind === 'warn') {
         $.ui.toast(warnToast(alert.window, cfg.th, cfg.lang), { timeoutMs: 8000 })
@@ -815,7 +854,7 @@ export const register: Register = (on, options) => {
           <Text color={isWarn ? 'warning' : undefined} dimColor={!isWarn} wrap="truncate-end">
             {(isWarn ? '⚠ ' : '') + line}
           </Text>
-          {compact.isSuggested ? (
+          {compact.isSuggested && !pastHandoff(windows, cfg.th) ? (
             <Button
               key="compact"
               label={cfg.lang === 'zh' ? '压缩上下文' : 'Compact context'}
