@@ -190,6 +190,19 @@ describe('alerts', () => {
     expect(alertsFor([bare(90)], TH, [], kept).map(a => a.kind)).toEqual(['handoff'])
   })
 
+  test('an undated record stands for its own window, not a later one', async () => {
+    const seenAt = Date.parse('2026-01-01T13:00:00.000Z')
+    const key = `five_hour#~${seenAt}`
+    // Its own window began before it was seen, even when a reading dips.
+    expect(rearm([key], [five(3)], TH, seenAt + 60_000)).toEqual([key])
+    // A window that began after it, or a window's length later: another window.
+    expect(rearm([key], [five(40, '2026-01-01T18:30:00.000Z')], TH, seenAt + 3_600_000)).toEqual([])
+    expect(rearm([key], [], TH, seenAt + 5 * 3_600_000)).toEqual([])
+    // A record kept by an earlier version has no time: a low reading, dated or not, ends it.
+    expect(rearm(['five_hour#'], [five(3)], TH)).toEqual([])
+    expect(rearm(['five_hour#'], [five(60)], TH)).toEqual(['five_hour#'])
+  })
+
   test('a reading whose reset time has passed is not live', async () => {
     const bare: WindowReading = { kind: 'seven_day', percentUsed: 50 }
     expect(liveWindows([five(92), bare], Date.parse('2026-01-01T15:00:01.000Z'))).toEqual([bare])

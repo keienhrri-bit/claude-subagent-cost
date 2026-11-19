@@ -474,6 +474,106 @@ test('a reset time appearing or disappearing does not repeat an alert in the sam
   expect(JSON.stringify(rows[1]?.message.content)).not.toContain('7-day usage window')
 })
 
+test('an undated handoff does not stand for the window after it', async ($, on) => {
+  const w = world(on)
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 91 }])
+  expect(w.session.appended().length).toBe(1)
+
+  // More than five hours on, the next window's first reading has a reset time.
+  await w.clock.advance(5 * 3_600_000 + 60_000)
+  const next = new Date(w.clock.now() + 4 * 3_600_000).toISOString()
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 3, resetsAt: next }])
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 91, resetsAt: next }])
+  expect(w.session.appended().length).toBe(2)
+})
+
+test('a window that began after an undated handoff alerts again, even at a high first reading', async ($, on) => {
+  const w = world(on)
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 91 }])
+  expect(w.session.appended().length).toBe(1)
+
+  // An hour on, a window that started half an hour after that reading.
+  await w.clock.advance(3_600_000)
+  const next = new Date(NOW + 5.5 * 3_600_000).toISOString()
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 40, resetsAt: next }])
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 91, resetsAt: next }])
+  expect(w.session.appended().length).toBe(2)
+})
+
+/** A `session.append` hook that holds the first note until released, then
+ * stores it or, with `deny`, refuses it. */
+function holdFirstNote(on: On, deny?: string) {
+  let enter!: () => void
+  let release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  const released = new Promise<void>(resolve => { release = resolve })
+  let isHeld = false
+  on('session.append', { door: 'note' }, async (_$, e, next) => {
+    if (isHeld) return next(e)
+    isHeld = true
+    enter()
+    await released
+    return deny === undefined ? next(e) : { deny }
+  })
+  return { entered, release }
+}
+
+test('a window reset seen while an undated handoff is being sent is not undone by its confirmation', async ($, on) => {
+  const held = holdFirstNote(on)
+  const w = world(on)
+  const measuring = measureLimits($, [{ kind: 'five_hour', percentUsed: 91 }])
+  await Promise.race([held.entered, measuring])
+  try {
+    await measureLimits($, [{ kind: 'five_hour', percentUsed: 3 }])
+  } finally {
+    held.release()
+  }
+  await measuring
+  expect(w.session.appended().length).toBe(1)
+
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 91 }])
+  expect(w.session.appended().length).toBe(2)
+})
+
+test('a window reset seen while an undated handoff is being refused does not queue it again', async ($, on) => {
+  const held = holdFirstNote(on, 'test refusal')
+  const w = world(on)
+  const measuring = measureLimits($, [{ kind: 'five_hour', percentUsed: 91 }])
+  await Promise.race([held.entered, measuring])
+  try {
+    await measureLimits($, [{ kind: 'five_hour', percentUsed: 3 }])
+  } finally {
+    held.release()
+  }
+  await measuring
+  await mainTurn($, 't1', 'Done.')
+  expect(w.session.appended().length).toBe(0)
+
+  await measureLimits($, [{ kind: 'five_hour', percentUsed: 91 }])
+  expect(w.session.appended().length).toBe(1)
+})
+
+test('a request 0.1.0 left pending for an undated window is dropped by a low reading', async ($, on) => {
+  const w = world(on)
+  const legacy = { key: 'five_hour@none', text: '[subagent-cost] The 5-hour usage window is at 91%. Write the handoff brief.' }
+  on('state.get', { plugin: PLUGIN, key: 'pendingNote' }, async (_$, e, next) => {
+    const stored = await next(e)
+    return stored.value?.version === 0 ? { value: { version: 0, value: legacy } } : stored
+  })
+  on('state.get', { plugin: PLUGIN, key: 'handedOff' }, async (_$, e, next) => {
+    const stored = await next(e)
+    return stored.value?.version === 0 ? { value: { version: 0, value: [legacy.key] } } : stored
+  })
+  await measure($, 3)
+  expect(w.session.appended().length).toBe(0)
+
+  await measure($, 91)
+  expect(w.session.appended().length).toBe(1)
+  const text = JSON.stringify(w.session.appended()[0]?.message.content)
+  expect(text).not.toContain('Write the handoff brief.')
+  expect(text).toContain('5-hour usage window is at 91%')
+})
+
 test('an expired reading is ignored before estimating or scheduling a handoff', async ($, on) => {
   const w = world(on)
   let estimated = false

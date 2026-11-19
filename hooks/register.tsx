@@ -26,6 +26,7 @@ import {
   bandLine,
   cacheSplit,
   contextOverThreshold,
+  currentWindows,
   endsWithQuestion,
   familyOf,
   handoffNote,
@@ -191,7 +192,8 @@ function mergeHandoffs(first: HandoffBatch | null, second: HandoffBatch | null):
 }
 
 /** A claim's windows and text, without its id: what goes back in the queue. */
-function batchOf(claim: HandoffClaim): HandoffBatch {
+function batchOf(claim: HandoffClaim): HandoffBatch | null {
+  if (claim.windows.length === 0 && !claim.legacy) return null
   return claim.legacy ? { windows: claim.windows, legacy: claim.legacy } : { windows: claim.windows }
 }
 
@@ -202,17 +204,30 @@ function requestText(batch: HandoffBatch, id: string, cwd: string, now: number):
   return legacy ? `${legacy}\n\n${requestTag(id)}` : undefined
 }
 
+/** A batch less what an earlier window left in it, the rest dated by these
+ * readings: in that order, or an earlier window's record would take a later
+ * window's reset time. A claim keeps its id. */
+function currentBatch(batch: HandoffClaim, readings: readonly WindowReading[], now: number): HandoffClaim {
+  const windows = currentWindows(batch.windows, readings, cfg.th, now).map(w => rememberReset(w, readings))
+  const keys = batch.legacy ? rearm(batch.legacy.key.split(' + '), readings, cfg.th, now) : []
+  const out: HandoffClaim = { windows }
+  if (batch.legacy && keys.length > 0) out.legacy = { ...batch.legacy, key: keys.join(' + ') }
+  if (batch.id !== undefined) out.id = batch.id
+  return out
+}
+
 function liveHandoff(
   batch: HandoffBatch | null,
   now: number,
   readings: readonly WindowReading[] = [],
 ): HandoffBatch | null {
   if (!batch) return null
-  const dated = liveWindows(batch.windows.map(w => rememberReset(w, readings)), now)
-  const stillDue = new Set(rearm(dated.map(windowKey), readings, cfg.th))
-  const windows = dated.filter(w => stillDue.has(windowKey(w)))
-  const legacy = batch.legacy?.key.split(' + ').some(key => isLiveAlertKey(key, now)) ? batch.legacy : undefined
-  return windows.length > 0 || legacy ? { windows, legacy } : null
+  const current = currentBatch(batch, readings, now)
+  const windows = liveWindows(current.windows, now)
+  const keys = current.legacy?.key.split(' + ').filter(key => isLiveAlertKey(key, now)) ?? []
+  const legacy = current.legacy && keys.length > 0 ? { ...current.legacy, key: keys.join(' + ') } : undefined
+  if (windows.length === 0 && !legacy) return null
+  return legacy ? { windows, legacy } : { windows }
 }
 
 async function observeAlerts($: EngineInterface, windows: WindowReading[], now: number): Promise<Alert[]> {
@@ -220,13 +235,11 @@ async function observeAlerts($: EngineInterface, windows: WindowReading[], now: 
   let alerts: Alert[] = []
   await update($, alertsAtom, current => {
     const state = current ?? initial
-    const warned = rememberResets(rearm(state.warned, windows, cfg.th), windows)
-    const handedOff = rememberResets(rearm(state.handedOff, windows, cfg.th), windows)
+    const warned = rememberResets(rearm(state.warned, windows, cfg.th, now), windows)
+    const handedOff = rememberResets(rearm(state.handedOff, windows, cfg.th, now), windows)
     const waiting = liveHandoff(state.waiting, now, windows)
-    const sending = state.sending && {
-      ...state.sending,
-      windows: state.sending.windows.map(w => rememberReset(w, windows)),
-    }
+    // A window that reset mid-send is neither confirmed nor queued again.
+    const sending = state.sending && currentBatch(state.sending, windows, now)
     const reserved = rememberResets([...handoffKeys(waiting), ...handoffKeys(sending)], windows)
     alerts = alertsFor(windows, cfg.th, warned, [...handedOff, ...reserved], now)
     const due = alerts.filter(a => a.kind === 'handoff').map(a => a.window)
@@ -764,11 +777,12 @@ export const register: Register = (on, options) => {
 
   on('session.measure', async ($, e, next) => {
     const now = await $.clock.now()
-    const windows = liveWindows(e.rateLimits.map(r => ({
-      kind: r.kind,
-      percentUsed: r.percentUsed,
-      resetsAt: r.resetsAt?.trim() || undefined,
-    })), now)
+    const windows = liveWindows(e.rateLimits.map((r): WindowReading => {
+      const resetsAt = r.resetsAt?.trim() || undefined
+      return resetsAt
+        ? { kind: r.kind, percentUsed: r.percentUsed, resetsAt }
+        : { kind: r.kind, percentUsed: r.percentUsed, seenAt: now }
+    }), now)
     await update($, contextAtom, () => ({
       tokens: e.context.tokens,
       percent: e.context.percent,

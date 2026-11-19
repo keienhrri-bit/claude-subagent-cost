@@ -13,6 +13,9 @@ export type WindowReading = {
   kind: string
   percentUsed: number
   resetsAt?: string
+  /** When a reading without a reset time was taken, in ms: what tells its
+   * window from a later one. */
+  seenAt?: number
 }
 
 /** One subagent run, keyed by the Agent tool call that started it. */

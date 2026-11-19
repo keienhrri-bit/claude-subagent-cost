@@ -184,11 +184,22 @@ export function sameWindow(a: string | undefined, b: string | undefined): boolea
   return Math.abs(ta - tb) < 10 * 60 * 1000
 }
 
-/** The key a fired alert is kept under: the window's kind and reset time. */
-type WindowIdentity = Pick<WindowReading, 'kind' | 'resetsAt'>
+/** How long each kind of window lasts. */
+const WINDOW_MS: Readonly<Record<string, number>> = {
+  [FIVE_HOUR]: 5 * 3_600_000,
+  [SEVEN_DAY]: 7 * 24 * 3_600_000,
+}
+
+/** The slack `sameWindow` allows a reset time. */
+const RESET_SLACK_MS = 10 * 60 * 1000
+
+/** The key a fired alert is kept under: the window's kind and reset time or,
+ * without one, when the reading was taken (`kind#~ms`). */
+type WindowIdentity = Pick<WindowReading, 'kind' | 'resetsAt' | 'seenAt'>
 
 export function windowKey(w: WindowIdentity): string {
-  return `${w.kind}#${w.resetsAt ?? ''}`
+  if (w.resetsAt) return `${w.kind}#${w.resetsAt}`
+  return `${w.kind}#${w.seenAt === undefined ? '' : `~${w.seenAt}`}`
 }
 
 /** Kind and reset time of a kept key, including the `kind@slot` keys of 0.1.0
@@ -196,8 +207,13 @@ export function windowKey(w: WindowIdentity): string {
 function keyParts(key: string): WindowIdentity | undefined {
   const hash = key.indexOf('#')
   if (hash >= 0) {
-    const resetsAt = key.slice(hash + 1).trim()
-    return resetsAt ? { kind: key.slice(0, hash), resetsAt } : { kind: key.slice(0, hash) }
+    const kind = key.slice(0, hash)
+    const rest = key.slice(hash + 1).trim()
+    if (rest.startsWith('~')) {
+      const seenAt = Number(rest.slice(1))
+      return Number.isFinite(seenAt) ? { kind, seenAt } : { kind }
+    }
+    return rest ? { kind, resetsAt: rest } : { kind }
   }
   const at = key.lastIndexOf('@')
   if (at < 0) return undefined
@@ -254,19 +270,62 @@ function thresholdsOf(kind: string, th: Thresholds): { warnAt: number; handoffAt
   return undefined
 }
 
-/** A low reading without a reset time can rearm an undated window. Dated
- * records retain their identity even if the reported percentage falls. */
-export function rearm(keys: readonly string[], windows: readonly WindowReading[], th: Thresholds): string[] {
-  const low = new Set<string>()
-  for (const w of windows) {
-    const t = thresholdsOf(w.kind, th)
-    if (!w.resetsAt && t && w.percentUsed < Math.min(t.warnAt, t.handoffAt) / 2) low.add(w.kind)
-  }
-  if (low.size === 0) return [...keys]
+/**
+ * Whether a record without a reset time belongs to a window that has reset
+ * since, so that a later window's readings must not match or date it. Dated
+ * records keep their identity even if the reported percentage falls.
+ *
+ * A record that says when it was seen is from an earlier window once that
+ * window's length has passed since, or once a reading's reset time puts the
+ * start of its window after that moment (give or take the slack of
+ * `sameWindow`). A record an earlier version kept says nothing of when: it is
+ * from an earlier window once a reading falls under half the lower threshold,
+ * with a reset time or without. A low reading without one ends either kind.
+ */
+function isFromEarlierWindow(
+  id: WindowIdentity,
+  readings: readonly WindowReading[],
+  th: Thresholds,
+  now?: number,
+): boolean {
+  if (id.resetsAt) return false
+  const t = thresholdsOf(id.kind, th)
+  const length = WINDOW_MS[id.kind]
+  const seenAt = id.seenAt
+  if (seenAt !== undefined && length !== undefined && now !== undefined && now - seenAt >= length) return true
+  return readings.some(r => {
+    if (r.kind !== id.kind) return false
+    if (!r.resetsAt || seenAt === undefined) {
+      return t !== undefined && r.percentUsed < Math.min(t.warnAt, t.handoffAt) / 2
+    }
+    const reset = Date.parse(r.resetsAt)
+    return length !== undefined && !Number.isNaN(reset) && reset - length - RESET_SLACK_MS > seenAt
+  })
+}
+
+/** The kept keys still standing for the current windows: run before
+ * `rememberResets`, which would give an earlier window's record a later
+ * window's reset time. */
+export function rearm(
+  keys: readonly string[],
+  windows: readonly WindowReading[],
+  th: Thresholds,
+  now?: number,
+): string[] {
   return keys.filter(k => {
     const p = keyParts(k)
-    return p === undefined || p.resetsAt !== undefined || !low.has(p.kind)
+    return p === undefined || !isFromEarlierWindow(p, windows, th, now)
   })
+}
+
+/** The windows of a pending request that still name a current window. */
+export function currentWindows(
+  windows: readonly WindowReading[],
+  readings: readonly WindowReading[],
+  th: Thresholds,
+  now?: number,
+): WindowReading[] {
+  return windows.filter(w => !isFromEarlierWindow(w, readings, th, now))
 }
 
 /** The readings still current: a window whose reset time has passed says
